@@ -1,0 +1,26 @@
+---
+title: "Project"
+output: html_document
+date: "2026-03-09"
+---
+
+# Libraries
+```{r}
+library(rminer)
+```
+
+# Data
+```{r}
+baltimore <- read.csv("baltimore.csv", sep = ",")
+lancaster <- read.csv("lancaster.csv", sep = ",")
+philadelphia <- read.csv("philadelphia.csv", sep= ",")
+richmond <- read.csv("richmond.csv", sep = ",")
+```
+
+# EDA & Pre-Processing
+```{r}
+
+```
+
+
+
