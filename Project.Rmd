@@ -11,10 +11,10 @@ library(rminer)
 
 # Data
 ```{r}
-baltimore <- read.csv("baltimore.csv", sep = ",")
-lancaster <- read.csv("lancaster.csv", sep = ",")
-philadelphia <- read.csv("philadelphia.csv", sep= ",")
-richmond <- read.csv("richmond.csv", sep = ",")
+baltimore <- read.csv("data/baltimore.csv", sep = ",")
+lancaster <- read.csv("data/lancaster.csv", sep = ",")
+philadelphia <- read.csv("data/philadelphia.csv", sep= ",")
+richmond <- read.csv("data/richmond.csv", sep = ",")
 ```
 
 # EDA & Pre-Processing
