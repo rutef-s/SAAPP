@@ -11,6 +11,13 @@ library(rminer)
 
 # Data
 ```{r}
+str(baltimore)
+str(lancaster)
+str(philadelphia)
+str(richmond)
+```
+
+```{r}
 baltimore <- read.csv("data/baltimore.csv", sep = ",")
 lancaster <- read.csv("data/lancaster.csv", sep = ",")
 philadelphia <- read.csv("data/philadelphia.csv", sep= ",")
@@ -19,8 +26,15 @@ richmond <- read.csv("data/richmond.csv", sep = ",")
 
 # EDA & Pre-Processing
 ```{r}
-
+cat("Number of Missing Values for Baltimore Dataset: ", sum(is.na(baltimore)), "\n")
+cat("Number of Missing Values for Lancaster Dataset: ", sum(is.na(lancaster)), "\n")
+cat("Number of Missing Values for Philadelphia Dataset: ", sum(is.na(philadelphia)), "\n")
+cat("Number of Missing Values for Richmond Dataset: ", sum(is.na(richmond)))
 ```
 
-
-
+```{r}
+cat("Number of Duplicated Values for Baltimore Dataset: ", sum(duplicated(baltimore)), "\n")
+cat("Number of Duplicated Values for Lancaster Dataset: ", sum(duplicated(lancaster)), "\n")
+cat("Number of Duplicated Values for Philadelphia Dataset: ", sum(duplicated(philadelphia)), "\n")
+cat("Number of Duplicated Values for Richmond Dataset: ", sum(duplicated(richmond)))
+```
