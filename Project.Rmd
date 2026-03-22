@@ -402,7 +402,8 @@ richmond$TouristEvent <- as.factor(richmond$TouristEvent)
 ```
 
 ```{r}
-# Analise Outliers
+# Analyze Outliers
+
 ```
 
 
