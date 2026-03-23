@@ -1,0 +1,376 @@
+# Libraries
+```{r}
+library(rminer)
+```
+
+# Data
+```{r}
+baltimore <- read.csv("data/baltimore.csv", sep = ",")
+lancaster <- read.csv("data/lancaster.csv", sep = ",")
+philadelphia <- read.csv("data/philadelphia.csv", sep= ",")
+richmond <- read.csv("data/richmond.csv", sep = ",")
+```
+
+# EDA & Pre-Processing
+
+```{r}
+cat("--- Baltimore ---\n\n")
+str(baltimore)
+
+cat("\n--- Lancaster ---\n\n")
+str(lancaster)
+
+cat("\n--- Philadelphia ---\n\n")
+str(philadelphia)
+
+cat("\n --- Richmond ---\n\n")
+str(richmond)
+```
+
+```{r}
+# Convert Date
+baltimore$Date <- as.Date(baltimore$Date)
+lancaster$Date <- as.Date(lancaster$Date)
+philadelphia$Date <- as.Date(philadelphia$Date)
+richmond$Date <- as.Date(richmond$Date)
+```
+
+```{r}
+# Convert TourisEvent
+baltimore$TouristEvent <- as.factor(baltimore$TouristEvent)
+lancaster$TouristEvent <- as.factor(lancaster$TouristEvent)
+philadelphia$TouristEvent <- as.factor(philadelphia$TouristEvent)
+richmond$TouristEvent <- as.factor(richmond$TouristEvent)
+```
+
+
+```{r}
+cat("--- Baltimore ---\n\n")
+str(baltimore)
+
+cat("\n--- Lancaster ---\n\n")
+str(lancaster)
+
+cat("\n--- Philadelphia ---\n\n")
+str(philadelphia)
+
+cat("\n --- Richmond ---\n\n")
+str(richmond)
+```
+```{r}
+clean_data <- function(df) {
+  df <- df[!(df$Num_Customers == 0 & df$Sales > 0), ]
+  
+  return(df)
+}
+
+baltimore <- clean_data(baltimore)
+lancaster <- clean_data(lancaster)
+philadelphia <- clean_data(philadelphia)
+richmond <- clean_data(richmond)
+```
+
+
+```{r}
+# Missing Values
+cat("Number of Missing Values for Baltimore Dataset: ", sum(is.na(baltimore)), "\n")
+cat("Number of Missing Values for Lancaster Dataset: ", sum(is.na(lancaster)), "\n")
+cat("Number of Missing Values for Philadelphia Dataset: ", sum(is.na(philadelphia)), "\n")
+cat("Number of Missing Values for Richmond Dataset: ", sum(is.na(richmond)))
+```
+
+```{r}
+# Duplicated Values
+cat("Number of Duplicated Values for Baltimore Dataset: ", sum(duplicated(baltimore)), "\n")
+cat("Number of Duplicated Values for Lancaster Dataset: ", sum(duplicated(lancaster)), "\n")
+cat("Number of Duplicated Values for Philadelphia Dataset: ", sum(duplicated(philadelphia)), "\n")
+cat("Number of Duplicated Values for Richmond Dataset: ", sum(duplicated(richmond)))
+```
+
+```{r}
+cat("--- Baltimore ---\n")
+print(subset(baltimore, Num_Customers == 0))
+
+cat("\n--- Lancaster ---\n")
+print(subset(lancaster, Num_Customers == 0))
+
+cat("\n--- Philadelphia ---\n")
+print(subset(philadelphia, Num_Customers == 0))
+
+cat("\n--- Richmond ---\n")
+print(subset(richmond, Num_Customers == 0))
+```
+
+```{r}
+cat("--- Baltimore ---\n")
+print(subset(baltimore, Num_Customers == 0 & Sales > 0))
+
+cat("\n--- Lancaster ---\n")
+print(subset(lancaster, Num_Customers == 0 & Sales > 0))
+
+cat("\n--- Philadelphia ---\n")
+print(subset(philadelphia, Num_Customers == 0 & Sales > 0))
+
+cat("\n--- Richmond ---\n")
+print(subset(richmond, Num_Customers == 0 & Sales > 0))
+```
+
+From the previous analysis, we identified days where the number of customers is equal to zero. In some of these cases, namely on December 25th, it is clear that the stores were closed, as there were no employees, no customers, and no sales recorded. These observations are consistent with expected business behavior and should be retained in the dataset. It is important for the forecasting models to learn that on specific dates (e.g., Christmas), the stores are closed, leading to zero customers and zero sales.
+
+However, we also identified cases where the number of customers is zero while sales are strictly positive. In particular, this occurs on March 31st, where there are employees working and sales recorded, but no customers. This situation is logically inconsistent, since sales necessarily imply the presence of customers. Even in the case of online purchases, each transaction corresponds to a customer, and therefore the number of customers cannot be zero when sales are observed.
+
+Given that this scenario violates the fundamental relationship between customers and sales, and does not represent realistic business behavior, these observations are considered data inconsistencies. Therefore, they are removed from the dataset in order to ensure data quality and logical consistency for the forecasting models.
+
+
+```{r}
+cat("--- Baltimore ---\n")
+print(subset(baltimore, Num_Customers == 0 & Sales > 0))
+
+cat("\n--- Lancaster ---\n")
+print(subset(lancaster, Num_Customers == 0 & Sales > 0))
+
+cat("\n--- Philadelphia ---\n")
+print(subset(philadelphia, Num_Customers == 0 & Sales > 0))
+
+cat("\n--- Richmond ---\n")
+print(subset(richmond, Num_Customers == 0 & Sales > 0))
+```
+```{r}
+cat("Number of Missing Values for Baltimore Dataset: ", sum(is.na(baltimore)), "\n")
+cat("Number of Missing Values for Lancaster Dataset: ", sum(is.na(lancaster)), "\n")
+cat("Number of Missing Values for Philadelphia Dataset: ", sum(is.na(philadelphia)), "\n")
+cat("Number of Missing Values for Richmond Dataset: ", sum(is.na(richmond)))
+```
+
+These last 2 code cells confirm those data were removed successfully.
+
+```{r}
+# Check the evolution of the Number of Customers
+plot(baltimore$Date, baltimore$Num_Customers,
+     type = "l",
+     main = "Baltimore - Number of Customers",
+     xlab = "Date",
+     ylab = "Customers")
+
+plot(lancaster$Date, lancaster$Num_Customers,
+     type = "l",
+     main = "Lancaster - Number of Customers",
+     xlab = "Date",
+     ylab = "Customers")
+
+plot(philadelphia$Date, philadelphia$Num_Customers,
+     type = "l",
+     main = "Philadelphia - Number of Customers",
+     xlab = "Date",
+     ylab = "Customers")
+
+plot(richmond$Date, richmond$Num_Customers,
+     type = "l",
+     main = "Richmond - Number of Customers",
+     xlab = "Date",
+     ylab = "Customers")
+```
+
+The time series of the number of customers shows a relatively stable level over time, with most observations ranging between approximately 80 and 200 customers per day.
+
+There is no clear long-term trend, indicating that the overall demand remains stable throughout the observed period.
+
+A strong weekly seasonal pattern is visible, characterized by regular fluctuations that likely correspond to differences between weekdays and weekends.
+
+Additionally, the series presents occasional sharp spikes, where the number of customers increases significantly above the typical range. These peaks may be associated with promotional activities or special events.
+
+Overall, the data exhibits a combination of stable baseline demand, clear weekly seasonality, and sporadic high-demand events.
+
+```{r}
+# Check Autocorrelation
+acf(baltimore$Num_Customers)
+acf(lancaster$Num_Customers)
+acf(philadelphia$Num_Customers)
+acf(richmond$Num_Customers)
+```
+
+The autocorrelation analysis reveals a strong dependence between consecutive observations, as indicated by the significant correlation at lag 1. Additionally, clear seasonal patterns are observed, with significant spikes at lag 7 and its multiples (14, 21, 28), confirming the presence of weekly seasonality.
+
+This pattern is consistent across all stores, suggesting a common underlying temporal structure in customer demand.
+
+```{r}
+# Partial Autocorrelation
+pacf(baltimore$Num_Customers)
+pacf(lancaster$Num_Customers)
+pacf(philadelphia$Num_Customers)
+pacf(richmond$Num_Customers)
+```
+
+The partial autocorrelation analysis shows a strong and significant spike at lag 1, indicating that the number of customers is directly influenced by the previous day's value. Higher-order lags show weaker or insignificant direct effects.
+
+Although the autocorrelation function revealed clear weekly seasonality, the PACF suggests that this seasonal pattern is not driven by a direct dependence at lag 7, but rather emerges from the accumulation of short-term dependencies.
+
+Therefore, lag 1 is identified as the most relevant direct predictor, while lag 7 is included to explicitly capture seasonal effects.
+
+```{r}
+cat("--- Baltimore ---\n\n")
+summary(baltimore)
+
+cat("\n--- Lancaster ---\n\n")
+summary(lancaster)
+
+cat("\n--- Philadelphia ---\n\n")
+summary(philadelphia)
+
+cat("\n--- Richmond ---\n\n")
+summary(richmond)
+```
+
+The descriptive statistics reveal clear differences in scale between the stores. Philadelphia and Lancaster exhibit higher average numbers of customers and sales, while Richmond consistently shows lower values, indicating smaller demand.
+
+Across all stores, the maximum values are substantially higher than the median, suggesting the presence of significant peaks, likely associated with promotional events or external factors.
+
+The distributions of both customers and sales appear to be positively skewed, as the mean tends to exceed the median. Additionally, the presence of zero values confirms the existence of closed days or anomalous observations previously identified.
+
+Overall, while the stores share similar behavioral patterns, they differ considerably in magnitude, reinforcing the need to account for store-specific effects in the modeling phase.
+
+# Criação de lags e variáveis temporais
+
+
+```{r}
+prepare_features <- function(df) {
+  # Ordenar por data
+  df <- df[order(df$Date), ]
+  rownames(df) <- NULL
+  
+  # Variáveis temporais
+  df$DayOfWeek <- as.factor(weekdays(df$Date))
+  df$Month     <- as.factor(format(df$Date, "%m"))
+
+  # Lags do target 
+  df$Lag1 <- c(NA, df$Num_Customers[-nrow(df)])
+  df$Lag7 <- c(rep(NA, 7), df$Num_Customers[-((nrow(df) - 6):nrow(df))])
+
+  # Lag de Sales 
+  df$Lag1_Sales <- c(NA, df$Sales[-nrow(df)])
+    # Remover linhas com NAs introduzidos pelos lags
+  
+  df <- df[complete.cases(df), ]
+  rownames(df) <- NULL 
+  
+  #Remover data leakage
+  df$Date <- NULL
+  df$Sales <- NULL 
+  
+  return(df)
+}
+
+baltimore_f    <- prepare_features(baltimore)
+lancaster_f    <- prepare_features(lancaster)
+philadelphia_f <- prepare_features(philadelphia)
+richmond_f     <- prepare_features(richmond)
+```
+
+
+#Criação de lags e variáveis temporais
+```{r}
+# Horizonte de previsão: 1 semana --> 7 dias
+H_forecast <- 7
+
+# Número de iterações do rolling window
+n_iter <- 5
+
+# Função principal: treino e avaliação com rolling window
+rolling_window_forecast <- function(df, store_name, H_forecast = 7, n_iter = 5) {
+
+  n     <- nrow(df)
+  W     <- n - (n_iter * H_forecast)  # tamanho fixo da janela de treino
+  S     <- H_forecast                 # incremento = horizonte (sem sobreposição)
+
+  cat("=========================================\n")
+  cat("Loja:", store_name, "\n")
+  cat("Total de observações:", n, "\n")
+  cat("Tamanho da janela de treino (W):", W, "\n")
+  cat("Horizonte de previsão (H):", H_forecast, "dias\n")
+  cat("Incremento (S):", S, "\n")
+  cat("Número de iterações:", n_iter, "\n")
+  cat("=========================================\n\n")
+
+  ev <- numeric(n_iter)
+
+  # Valor de referência para NMAE: range do target no conjunto completo
+  YR <- max(df$Num_Customers) - min(df$Num_Customers)
+
+  for (b in 1:n_iter) {
+
+    H_split <- holdout(df$Num_Customers,
+                       ratio     = H_forecast,
+                       mode      = "rolling",
+                       iter      = b,
+                       window    = W,
+                       increment = S)
+
+    M <- fit(Num_Customers ~ ., df[H_split$tr, ], model = "randomForest")
+    P <- predict(M, df[H_split$ts, ])
+
+    trinit <- (b - 1) * S + 1
+    trend  <- trinit + length(H_split$tr) - 1
+    tsinit <- trend + 1
+    tsend  <- tsinit + length(H_split$ts) - 1
+
+    ev[b] <- mmetric(df$Num_Customers[H_split$ts], P, "NMAE", val = YR)
+
+    cat("iter:", b,
+        " | TR:", trinit, "->", trend, "(", length(H_split$tr), "obs)",
+        " | TS:", tsinit, "->", tsend, "(", length(H_split$ts), "obs)",
+        " | NMAE:", round(ev[b], 4), "\n")
+  }
+
+  cat("\nNMAE por iteração:", round(ev, digits = 2), "\n")
+  cat("Média  NMAE:", round(mean(ev),   digits = 2), "\n")
+  cat("Mediana NMAE:", round(median(ev), digits = 2), "\n\n")
+
+  return((ev))
+}
+```
+
+```{r}
+stores      <- list(baltimore_f, lancaster_f, philadelphia_f, richmond_f)
+store_names <- c("Baltimore", "Lancaster", "Philadelphia", "Richmond")
+
+all_results <- lapply(seq_along(stores), function(i) {
+  df         <- stores[[i]]
+  store_name <- store_names[i]
+
+  # --- Rolling Window (avaliação) ---
+  ev <- rolling_window_forecast(df, store_name, H_forecast, n_iter)
+
+  # --- Previsão próxima semana ---
+  M     <- fit(Num_Customers ~ ., df, model = "randomForest")
+  P     <- round(predict(M, tail(df, 7)), 0)
+
+  list(store = store_name, mean_nmae = mean(ev), median_nmae = median(ev), preds = P)
+})
+
+# --- Resumo Comparativo ---
+preds_matrix <- sapply(all_results, `[[`, "preds")
+colnames(preds_matrix) <- store_names
+rownames(preds_matrix) <- paste0("Dia +", 1:7)
+
+results <- data.frame(
+  Store       = sapply(all_results, `[[`, "store"),
+  Mean_NMAE   = round(sapply(all_results, `[[`, "mean_nmae"),   4),
+  Median_NMAE = round(sapply(all_results, `[[`, "median_nmae"), 4)
+)
+
+cat("=== Resumo Comparativo - Rolling Window (H=7 dias) ===\n\n")
+print(results)
+cat("\nLoja com menor NMAE médio:", results$Store[which.min(results$Mean_NMAE)], "\n")
+
+cat("\n=== Previsão de Clientes - Próxima Semana ===\n\n")
+print(preds_matrix)
+```
+
+The descriptive statistics reveal clear differences in scale between the stores. Philadelphia and Lancaster exhibit higher average numbers of customers and sales, while Richmond consistently shows lower values, indicating smaller demand.
+
+Across all stores, the maximum values are substantially higher than the median, suggesting the presence of significant peaks, likely associated with promotional events or external factors.
+
+The distributions of both customers and sales appear to be positively skewed, as the mean tends to exceed the median. Additionally, the presence of zero values confirms the existence of closed days or anomalous observations previously identified.
+
+Overall, while the stores share similar behavioral patterns, they differ considerably in magnitude, reinforcing the need to account for store-specific effects in the modeling phase.
+
