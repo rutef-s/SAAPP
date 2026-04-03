@@ -292,7 +292,9 @@ ccf_positive <- function(x, y, lag.max = 28, main = "CCF (Positive Lags Only)") 
   abline(h = 0, col = "black")
   abline(h = c(-conf, conf), col = "blue", lty = 2)
 }
-```«
+```
+
+This function 
 
 ```{r}
 # Check if Promotions affect customers who are late. With Differencing
