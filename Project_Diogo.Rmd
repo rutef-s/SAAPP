@@ -9,6 +9,7 @@ date: "2026-03-09"
 library(rminer)
 library(aTSA)
 library(dplyr)
+library(timeDate)
 ```
 
 # Data
@@ -286,7 +287,7 @@ ccf_positive <- function(x, y, lag.max = 28, main = "CCF (Positive Lags Only)") 
   conf <- 2 / sqrt(n)
   
   plot(lags_pos, acf_pos, type = "h",
-       xlab = "Lag", ylab = "CCF",
+       xlab = "Lag", ylab = "ACF",
        main = main)
   
   abline(h = 0, col = "black")
@@ -294,14 +295,23 @@ ccf_positive <- function(x, y, lag.max = 28, main = "CCF (Positive Lags Only)") 
 }
 ```
 
-This function 
+This function was created to check only the positive values of LAG.
+
+```{r}
+# Check if Promotions affect customers who are late
+ccf_positive(baltimore$Pct_On_Sale, baltimore$Num_Customers)
+ccf_positive(lancaster$Pct_On_Sale, lancaster$Num_Customers)
+ccf_positive(philadelphia$Pct_On_Sale, philadelphia$Num_Customers)
+ccf_positive(richmond$Pct_On_Sale, richmond$Num_Customers)
+```
+
 
 ```{r}
 # Check if Promotions affect customers who are late. With Differencing
-ccf(diff(baltimore$Pct_On_Sale), diff(baltimore$Num_Customers))
-ccf(diff(lancaster$Pct_On_Sale), diff(lancaster$Num_Customers))
-ccf(diff(philadelphia$Pct_On_Sale), diff(philadelphia$Num_Customers))
-ccf(diff(richmond$Pct_On_Sale), diff(richmond$Num_Customers))
+ccf_positive(diff(baltimore$Pct_On_Sale), diff(baltimore$Num_Customers))
+ccf_positive(diff(lancaster$Pct_On_Sale), diff(lancaster$Num_Customers))
+ccf_positive(diff(philadelphia$Pct_On_Sale), diff(philadelphia$Num_Customers))
+ccf_positive(diff(richmond$Pct_On_Sale), diff(richmond$Num_Customers))
 ```
 
 The **CCF (Cross-Correlation Function)** between *Pct_On_Sale* and *Num_Customers* initially shows several positive correlations across multiple lags, with a clear peak at Lag0. This suggests that promotions are associated with an increase in customers both contemporaneously and across different time shifts.
@@ -324,20 +334,20 @@ philadelphia$TouristEvent_num <- ifelse(philadelphia$TouristEvent == 'Yes', 1, 0
 richmond$TouristEvent_num <- ifelse(richmond$TouristEvent == 'Yes', 1, 0)
 
 # CCF
-ccf(baltimore$TouristEvent_num, baltimore$Num_Customers)
-ccf(lancaster$TouristEvent_num, lancaster$Num_Customers)
-ccf(philadelphia$TouristEvent_num, philadelphia$Num_Customers)
-ccf(richmond$TouristEvent_num, richmond$Num_Customers)
+ccf_positive(baltimore$TouristEvent_num, baltimore$Num_Customers)
+ccf_positive(lancaster$TouristEvent_num, lancaster$Num_Customers)
+ccf_positive(philadelphia$TouristEvent_num, philadelphia$Num_Customers)
+ccf_positive(richmond$TouristEvent_num, richmond$Num_Customers)
 ```
 
 
 
 ```{r}
 # Check if the Events have an immediate or delayed effect. With differencing
-ccf(diff(baltimore$TouristEvent_num), diff(baltimore$Num_Customers))
-ccf(diff(lancaster$TouristEvent_num), diff(lancaster$Num_Customers))
-ccf(diff(philadelphia$TouristEvent_num), diff(philadelphia$Num_Customers))
-ccf(diff(richmond$TouristEvent_num), diff(richmond$Num_Customers))
+ccf_positive(diff(baltimore$TouristEvent_num), diff(baltimore$Num_Customers))
+ccf_positive(diff(lancaster$TouristEvent_num), diff(lancaster$Num_Customers))
+ccf_positive(diff(philadelphia$TouristEvent_num), diff(philadelphia$Num_Customers))
+ccf_positive(diff(richmond$TouristEvent_num), diff(richmond$Num_Customers))
 ```
 
 The **CCF (Cross-Correlation Function)** between *TouristEvent_num* and *Num_Customers* shows a strong and consistent peak at Lag0 across all locations, indicating a clear contemporaneous relationship: the presence of events is directly associated with an increase in the number of customers on the same day.
@@ -449,11 +459,51 @@ philadelphia$TouristEvent <- as.factor(philadelphia$TouristEvent)
 richmond$TouristEvent <- as.factor(richmond$TouristEvent)
 ```
 
+
 ```{r}
-# Analyze Outliers
-boxplot(
-  
-)
+create_holiday_feature <- function(df) {
+  # This functions is only used to create holiday feature for US Calendar
+  df$Date <- as.Date(df$Date)
+
+  start_year <- as.numeric(format(min(df$Date), "%Y"))
+  end_year <- as.numeric(format(max(df$Date), "%Y"))
+
+  years <- start_year:end_year
+
+  us_holidays <- as.Date(holidayNYSE(years))
+
+  thanksgiving <- as.Date(USThanksgivingDay(years))
+  black_friday <- as.Date(thanksgiving + 1)
+  christmas <- as.Date(USChristmasDay(years))
+
+  all_holidays <- unique(c(us_holidays, thanksgiving, black_friday, christmas))
+
+  df$IsHoliday <- ifelse(df$Date %in% all_holidays, 1, 0)
+  df$IsBlackFriday <- ifelse(df$Date %in% black_friday, 1, 0)
+  df$IsChristmas <- ifelse(df$Date %in% christmas, 1, 0)
+
+  return(df)
+}
 ```
+
+```{r}
+baltimore <- create_holiday_feature(baltimore)
+lancaster <- create_holiday_feature(lancaster)
+philadelphia <- create_holiday_feature(philadelphia)
+richmond <- create_holiday_feature(richmond)
+```
+
+Feature engineering plays a crucial role in improving the model’s ability to capture underlying patterns in time series data. In this context, additional calendar-based features were introduced to incorporate external information that is not directly observable from the original variables.
+
+Specifically, holiday-related variables were created, including general holidays (`IsHoliday`), Christmas (`IsChristmas`), and Black Friday (`IsBlackFriday`). These features allow the model to distinguish between different types of days that have distinct impacts on customer behavior. For example, Christmas is associated with store closures and zero activity, while Black Friday typically leads to unusually high demand.
+
+By explicitly providing this contextual information, the model can better interpret extreme values, reduce ambiguity in the data, and improve its predictive performance.
+
+### *Detect Outliers*
+
+Outlier analysis is an essential part of Exploratory Data Analysis. While some observations appear as statistical outliers, many of them are driven by real-world events and therefore represent meaningful behavior rather than anomalies. As such, these values are retained to preserve the integrity of the time series.
+
+In time series analysis, observations are not removed based solely on their extremity, as doing so would disrupt the temporal structure of the data. Instead, each case is evaluated based on business logic. Extreme values associated with real events (e.g., promotions or holidays) are preserved, while only logically inconsistent observations are corrected or imputed to maintain data integrity without breaking the time sequence.
+
 
 
