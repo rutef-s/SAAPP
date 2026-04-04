@@ -364,34 +364,23 @@ This pattern is consistent across all stores, reinforcing the conclusion that ev
 # Create LAG, 1 and 7 (LAG7 we going to create even though the results of ACF and PACF told us that it is not that good, so the creation is only for testing purposes, and if the predictions got better this variable stays)
 baltimore$lag_1 <- lag(baltimore$Num_Customers, 1)
 baltimore$lag_2 <- lag(baltimore$Num_Customers, 2)
+baltimore$lag_7 <- lag(baltimore$Num_Customers, 7)
 baltimore <- na.omit(baltimore)
 
 lancaster$lag_1 <- lag(lancaster$Num_Customers, 1)
 lancaster$lag_2 <- lag(lancaster$Num_Customers, 2)
+lancaster$lag_7 <- lag(lancaster$Num_Customers, 7)
 lancaster <- na.omit(lancaster)
 
 philadelphia$lag_1 <- lag(philadelphia$Num_Customers, 1)
 philadelphia$lag_2 <- lag(philadelphia$Num_Customers, 2)
+philadelphia$lag_7 <- lag(philadelphia$Num_Customers, 7)
 philadelphia <- na.omit(philadelphia)
 
 richmond$lag_1 <- lag(richmond$Num_Customers, 1)
 richmond$lag_2 <- lag(richmond$Num_Customers, 2)
+richmond$lag_7 <- lag(richmond$Num_Customers, 7)
 richmond <- na.omit(richmond)
-```
-
-
-```{r}
-cat("--- Baltimore ---\n\n")
-summary(baltimore)
-
-cat("\n--- Lancaster ---\n\n")
-summary(lancaster)
-
-cat("\n--- Philadelphia ---\n\n")
-summary(philadelphia)
-
-cat("\n--- Richmond ---\n\n")
-summary(richmond)
 ```
 
 The descriptive statistics reveal clear differences in scale between the stores. Philadelphia and Lancaster exhibit higher average numbers of customers and sales, while Richmond consistently shows lower values, indicating smaller demand.
@@ -499,11 +488,93 @@ Specifically, holiday-related variables were created, including general holidays
 
 By explicitly providing this contextual information, the model can better interpret extreme values, reduce ambiguity in the data, and improve its predictive performance.
 
+```{r}
+cat("--- Baltimore ---\n\n")
+summary(baltimore)
+
+cat("\n--- Lancaster ---\n\n")
+summary(lancaster)
+
+cat("\n--- Philadelphia ---\n\n")
+summary(philadelphia)
+
+cat("\n--- Richmond ---\n\n")
+summary(richmond)
+```
+
 ### *Detect Outliers*
 
 Outlier analysis is an essential part of Exploratory Data Analysis. While some observations appear as statistical outliers, many of them are driven by real-world events and therefore represent meaningful behavior rather than anomalies. As such, these values are retained to preserve the integrity of the time series.
 
 In time series analysis, observations are not removed based solely on their extremity, as doing so would disrupt the temporal structure of the data. Instead, each case is evaluated based on business logic. Extreme values associated with real events (e.g., promotions or holidays) are preserved, while only logically inconsistent observations are corrected or imputed to maintain data integrity without breaking the time sequence.
 
+```{r}
+boxplot(baltimore$Sales, ylab = "Sales", xlab = "Count", main = "Baltimore", horizontal = TRUE)
+boxplot(lancaster$Sales, ylab = "Sales", xlab = "Count", main = "Baltimore", horizontal = TRUE)
+boxplot(philadelphia$Sales, ylab = "Sales", xlab = "Count", main = "Baltimore", horizontal = TRUE)
+boxplot(richmond$Sales, ylab = "Sales", xlab = "Count", main = "Baltimore", horizontal = TRUE)
+```
+
+```{r}
+# Get indexes where boxplot tells which observations are outliers
+get_outliers <- function(df, var) {
+  if (anyNA(df[[var]])) {
+    stop("This Feature has Missing Values. Please handle first the Missing Values.")
+  }
+  x <- df[[var]]
+  
+  # Calculate Boxplot Outliers
+  Q1 <- quantile(x, 0.25)
+  Q3 <- quantile(x, 0.75)
+  IQR <- Q3-Q1
+  
+  upper_bound = Q3 + 1.5 * IQR
+  lower_bound = Q1 - 1.5 * IQR
+  
+  boxplot_outliers <- which(x < lower_bound | x > upper_bound)
+    
+  # Calculate Hampel Identifier Outliers
+  median_x <- median(x)
+  mad_x <- mad(x, constant = 1)
+  
+  # Threshold ~ 3
+  hampel_threshold <- 3 * mad_x
+  hampel_outliers <- which(abs(x - median_x) > hampel_threshold)
+  
+  # Intersection between metrics
+  intersection_outliers <- intersect(boxplot_outliers, hampel_outliers)
+  
+  return(list(
+    iqrOutlier = boxplot_outliers,
+    hampelOutlier = hampel_outliers,
+    intersectionOutlier = intersection_outliers
+  ))
+}
+```
+
+```{r}
+# Check outliers
+outlier <- get_outliers(baltimore, "Sales")
+```
+
+```{r}
+cat("--- IQR Outliers ---\n")
+cat("Outliers:", outlier$iqrOutlier, "\n")
+cat("Number of Outliers:", length(outlier$iqrOutlier), "\n")
+
+cat("\n--- Hampel Outliers ---\n")
+cat("Outliers:", outlier$hampelOutlier, "\n")
+cat("Number of Outliers:", length(outlier$hampelOutlier), "\n")
+
+cat("\n--- Intersection ---\n")
+cat("Outliers:", outlier$intersectionOutlier, "\n")
+cat("Number of Outliers:", length(outlier$intersectionOutlier))
+
+if (identical(outlier$iqrOutlier, outlier$intersectionOutlier)) {
+  cat("\nIntersection is exactly equal to IQR!")
+} else {
+  cat("\nIntersection is a subset of both!")
+}
+```
 
 
