@@ -552,10 +552,12 @@ get_outliers <- function(df, var) {
 }
 ```
 
+
 ```{r}
 # Check outliers
 outlier <- get_outliers(baltimore, "Sales")
 ```
+
 
 ```{r}
 cat("--- IQR Outliers ---\n")
@@ -569,12 +571,95 @@ cat("Number of Outliers:", length(outlier$hampelOutlier), "\n")
 cat("\n--- Intersection ---\n")
 cat("Outliers:", outlier$intersectionOutlier, "\n")
 cat("Number of Outliers:", length(outlier$intersectionOutlier))
+```
 
-if (identical(outlier$iqrOutlier, outlier$intersectionOutlier)) {
-  cat("\nIntersection is exactly equal to IQR!")
-} else {
-  cat("\nIntersection is a subset of both!")
+```{r}
+baltimore_outlier <- baltimore[outlier$intersectionOutlier, c("Date", "Sales", "Num_Customers", "Pct_On_Sale", "IsHoliday")]
+lancaster_outlier <- lancaster[outlier$intersectionOutlier, c("Date", "Sales", "Num_Customers", "Pct_On_Sale", "IsHoliday")]
+philadelphia_outlier <- philadelphia[outlier$intersectionOutlier, c("Date", "Sales", "Num_Customers", "Pct_On_Sale", "IsHoliday")]
+richmond_outlier <- richmond[outlier$intersectionOutlier, c("Date", "Sales", "Num_Customers", "Pct_On_Sale", "IsHoliday")]
+```
+
+
+```{r}
+normalVsOutliers_visualization <- function(x_original, y_original, x_outlier, y_outlier, pch = 16, xlab, ylab, main, points_col, legend_cols, legend_place, legend_n) {
+  plot(x_original, y_original,
+       pch = pch, col = rgb(0.5, 0.5, 0.5, 0.3),
+       main = main,
+       xlab = xlab, ylab = ylab)
+
+  points(x_outlier, y_outlier,
+         col = points_col, pch=pch)
+
+  legend(legend_place, legend = legend_n,
+         col = legend_cols, pch=pch)
 }
 ```
+
+
+```{r}
+normalVsOutliers_visualization(
+  x_original = baltimore$Num_Customers,
+  y_original = baltimore$Sales,
+  x_outlier = baltimore_outlier$Num_Customers,
+  y_outlier = baltimore_outlier$Sales,
+  pch = 16,
+  xlab = "Number of Customers",
+  ylab = "Sales",
+  main = "Baltimore - Outliers Validation (Sales vs Customers)",
+  points_col = "red",
+  legend_cols = c("gray", "red"),
+  legend_place = "topleft",
+  legend = c("Normal Days", "Sales Outliers") 
+)
+
+normalVsOutliers_visualization(
+  x_original = lancaster$Num_Customers,
+  y_original = lancaster$Sales,
+  x_outlier = lancaster_outlier$Num_Customers,
+  y_outlier = lancaster_outlier$Sales,
+  pch = 16,
+  xlab = "Number of Customers",
+  ylab = "Sales",
+  main = "Lancaster - Outliers Validation (Sales vs Customers)",
+  points_col = "red",
+  legend_cols = c("gray", "red"),
+  legend_place = "topleft",
+  legend = c("Normal Days", "Sales Outliers") 
+)
+
+normalVsOutliers_visualization(
+  x_original = philadelphia$Num_Customers,
+  y_original = philadelphia$Sales,
+  x_outlier = philadelphia_outlier$Num_Customers,
+  y_outlier = philadelphia_outlier$Sales,
+  pch = 16,
+  xlab = "Number of Customers",
+  ylab = "Sales",
+  main = "Philadelphia - Outliers Validation (Sales vs Customers)",
+  points_col = "red",
+  legend_cols = c("gray", "red"),
+  legend_place = "topleft",
+  legend = c("Normal Days", "Sales Outliers") 
+)
+
+normalVsOutliers_visualization(
+  x_original = richmond$Num_Customers,
+  y_original = richmond$Sales,
+  x_outlier = richmond_outlier$Num_Customers,
+  y_outlier = richmond_outlier$Sales,
+  pch = 16,
+  xlab = "Number of Customers",
+  ylab = "Sales",
+  main = "Richmond - Outliers Validation (Sales vs Customers)",
+  points_col = "red",
+  legend_cols = c("gray", "red"),
+  legend_place = "topleft",
+  legend = c("Normal Days", "Sales Outliers") 
+)
+```
+
+
+
 
 
