@@ -256,7 +256,7 @@ ccf(richmond$Pct_On_Sale, richmond$Num_Customers)
 While negative lags could theoretically capture anticipation effects (e.g., customers delaying purchases in expectation of future promotions), the current dataset does not include information about events or promotions known in advance. Therefore, negative lags are not considered meaningful for this analysis.
 
 ```{r}
-ccf_positive <- function(x, y, lag.max = 28, main = "CCF (Positive Lags Only)") {
+ccf_positive <- function(x, y, lag.max = 28, main = "CCF (Positive Lags Only)", differential = TRUE) {
   if (anyNA(x) || anyNA(y)) {
     stop("x or y has missing values. Please handle missing values before using `ccf_positivie()`.")
   }
@@ -267,6 +267,11 @@ ccf_positive <- function(x, y, lag.max = 28, main = "CCF (Positive Lags Only)") 
   
   if (length(x) != length(y)) {
     stop("x and y must have the same length.")
+  }
+  
+  if (differential == TRUE) {
+    x <- diff(x)
+    y <- diff(y)
   }
   
   # Calculate CCf without plot
@@ -299,19 +304,19 @@ This function was created to check only the positive values of LAG.
 
 ```{r}
 # Check if Promotions affect customers who are late
-ccf_positive(baltimore$Pct_On_Sale, baltimore$Num_Customers)
-ccf_positive(lancaster$Pct_On_Sale, lancaster$Num_Customers)
-ccf_positive(philadelphia$Pct_On_Sale, philadelphia$Num_Customers)
-ccf_positive(richmond$Pct_On_Sale, richmond$Num_Customers)
+ccf_positive(baltimore$Pct_On_Sale, baltimore$Num_Customers, differential = FALSE)
+ccf_positive(lancaster$Pct_On_Sale, lancaster$Num_Customers, differential = FALSE)
+ccf_positive(philadelphia$Pct_On_Sale, philadelphia$Num_Customers, differential = FALSE)
+ccf_positive(richmond$Pct_On_Sale, richmond$Num_Customers, differential = FALSE)
 ```
 
 
 ```{r}
 # Check if Promotions affect customers who are late. With Differencing
-ccf_positive(diff(baltimore$Pct_On_Sale), diff(baltimore$Num_Customers))
-ccf_positive(diff(lancaster$Pct_On_Sale), diff(lancaster$Num_Customers))
-ccf_positive(diff(philadelphia$Pct_On_Sale), diff(philadelphia$Num_Customers))
-ccf_positive(diff(richmond$Pct_On_Sale), diff(richmond$Num_Customers))
+ccf_positive(baltimore$Pct_On_Sale, baltimore$Num_Customers, differential = TRUE)
+ccf_positive(lancaster$Pct_On_Sale, lancaster$Num_Customers, differential = TRUE)
+ccf_positive(philadelphia$Pct_On_Sale, philadelphia$Num_Customers, differential = TRUE)
+ccf_positive(richmond$Pct_On_Sale, richmond$Num_Customers, differential = TRUE)
 ```
 
 The **CCF (Cross-Correlation Function)** between *Pct_On_Sale* and *Num_Customers* initially shows several positive correlations across multiple lags, with a clear peak at Lag0. This suggests that promotions are associated with an increase in customers both contemporaneously and across different time shifts.
@@ -334,20 +339,20 @@ philadelphia$TouristEvent_num <- ifelse(philadelphia$TouristEvent == 'Yes', 1, 0
 richmond$TouristEvent_num <- ifelse(richmond$TouristEvent == 'Yes', 1, 0)
 
 # CCF
-ccf_positive(baltimore$TouristEvent_num, baltimore$Num_Customers)
-ccf_positive(lancaster$TouristEvent_num, lancaster$Num_Customers)
-ccf_positive(philadelphia$TouristEvent_num, philadelphia$Num_Customers)
-ccf_positive(richmond$TouristEvent_num, richmond$Num_Customers)
+ccf_positive(baltimore$TouristEvent_num, baltimore$Num_Customers, differential = FALSE)
+ccf_positive(lancaster$TouristEvent_num, lancaster$Num_Customers, differential = FALSE)
+ccf_positive(philadelphia$TouristEvent_num, philadelphia$Num_Customers, differential = FALSE)
+ccf_positive(richmond$TouristEvent_num, richmond$Num_Customers, differential = FALSE)
 ```
 
 
 
 ```{r}
 # Check if the Events have an immediate or delayed effect. With differencing
-ccf_positive(diff(baltimore$TouristEvent_num), diff(baltimore$Num_Customers))
-ccf_positive(diff(lancaster$TouristEvent_num), diff(lancaster$Num_Customers))
-ccf_positive(diff(philadelphia$TouristEvent_num), diff(philadelphia$Num_Customers))
-ccf_positive(diff(richmond$TouristEvent_num), diff(richmond$Num_Customers))
+ccf_positive(baltimore$TouristEvent_num, baltimore$Num_Customers)
+ccf_positive(lancaster$TouristEvent_num, lancaster$Num_Customers)
+ccf_positive(philadelphia$TouristEvent_num, philadelphia$Num_Customers)
+ccf_positive(richmond$TouristEvent_num, richmond$Num_Customers)
 ```
 
 The **CCF (Cross-Correlation Function)** between *TouristEvent_num* and *Num_Customers* shows a strong and consistent peak at Lag0 across all locations, indicating a clear contemporaneous relationship: the presence of events is directly associated with an increase in the number of customers on the same day.
@@ -361,35 +366,58 @@ Importantly, no consistent or strong delayed effects (Lag > 0) are observed afte
 This pattern is consistent across all stores, reinforcing the conclusion that events act as an immediate demand driver, and that incorporating lagged versions of this variable is not necessary for modeling purposes.
 
 ```{r}
-# Create LAG, 1 and 7 (LAG7 we going to create even though the results of ACF and PACF told us that it is not that good, so the creation is only for testing purposes, and if the predictions got better this variable stays)
-baltimore$lag_1 <- lag(baltimore$Num_Customers, 1)
-baltimore$lag_2 <- lag(baltimore$Num_Customers, 2)
-baltimore$lag_7 <- lag(baltimore$Num_Customers, 7)
-baltimore <- na.omit(baltimore)
-
-lancaster$lag_1 <- lag(lancaster$Num_Customers, 1)
-lancaster$lag_2 <- lag(lancaster$Num_Customers, 2)
-lancaster$lag_7 <- lag(lancaster$Num_Customers, 7)
-lancaster <- na.omit(lancaster)
-
-philadelphia$lag_1 <- lag(philadelphia$Num_Customers, 1)
-philadelphia$lag_2 <- lag(philadelphia$Num_Customers, 2)
-philadelphia$lag_7 <- lag(philadelphia$Num_Customers, 7)
-philadelphia <- na.omit(philadelphia)
-
-richmond$lag_1 <- lag(richmond$Num_Customers, 1)
-richmond$lag_2 <- lag(richmond$Num_Customers, 2)
-richmond$lag_7 <- lag(richmond$Num_Customers, 7)
-richmond <- na.omit(richmond)
+# Check which Lags from Sales are the better to explain Num_Customers
+ccf_positive(baltimore$Sales, baltimore$Num_Customers, differential = FALSE)
+ccf_positive(lancaster$Sales, lancaster$Num_Customers, differential = FALSE)
+ccf_positive(philadelphia$Sales, philadelphia$Num_Customers, differential = FALSE)
+ccf_positive(richmond$Sales, richmond$Num_Customers, differential = FALSE)
 ```
 
-The descriptive statistics reveal clear differences in scale between the stores. Philadelphia and Lancaster exhibit higher average numbers of customers and sales, while Richmond consistently shows lower values, indicating smaller demand.
+```{r}
+ccf_positive(baltimore$Sales, baltimore$Num_Customers, differential = TRUE)
+ccf_positive(lancaster$Sales, lancaster$Num_Customers, differential = TRUE)
+ccf_positive(philadelphia$Sales, philadelphia$Num_Customers, differential = TRUE)
+ccf_positive(richmond$Sales, richmond$Num_Customers, differential = TRUE)
+```
 
-Across all stores, the maximum values are substantially higher than the median, suggesting the presence of significant peaks, likely associated with promotional events or external factors.
+The **CCF (Cross-Correlation Function)** between the endogenous variable *Sales* and the target *Num_Customers* reveals crucial temporal dynamics, which are essential to engineer predictive features without introducing Data Leakage (using same-day sales).
 
-The distributions of both customers and sales appear to be positively skewed, as the mean tends to exceed the median. Additionally, the presence of zero values confirms the existence of closed days or anomalous observations previously identified.
+In the non-differenced series, a massive positive correlation is present across almost all lags. While this confirms a strong baseline relationship between sales volume and foot traffic, it is heavily inflated by high autocorrelation and shared long-term trends, masking the true underlying triggers.
 
-Overall, while the stores share similar behavioral patterns, they differ considerably in magnitude, reinforcing the need to account for store-specific effects in the modeling phase.
+After applying `diff()`, the overall structure becomes significantly more refined. By isolating daily fluctuations (shocks), the spurious correlations disappear, revealing the genuine lagged effects of sales variations on future customer demand.
+
+Importantly, consistent and statistically significant delayed effects are observed. Strong negative peaks emerge at **Lag 1** and **Lag 3**, indicating an immediate momentum followed by a short-term corrective adjustment. Furthermore, distinct positive peaks at **Lag 7** and **Lag 28** are clearly visible, capturing strong weekly and monthly seasonalities, respectively.
+
+This pattern is consistent across the stores, reinforcing the conclusion that historical sales act as a powerful advanced indicator. Consequently, incorporating **Lags 1, 3, 7, and 28** of the *Sales* variable is highly recommended for the modeling phase to capture daily inertia, weekly routines, and monthly purchasing cycles.
+
+```{r}
+## Create the Lags for Sales
+### ---- NOTA IMPORTANTE ----: Depois de vermos quais lags usar de cada variável é que corremos este código para não perder dados importantíssimos
+# baltimore$Sales_Lag1 <- lag(baltimore$Sales, 1)
+# baltimore$Sales_Lag3 <- lag(baltimore$Sales, 3)
+# baltimore$Sales_Lag7 <- lag(baltimore$Sales, 7)
+# baltimore$Sales_Lag28 <- lag(baltimore$Sales, 28)
+# baltimore <- na.omit(baltimore)
+# 
+# lancaster$Sales_Lag1 <- lag(lancaster$Sales, 1)
+# lancaster$Sales_Lag3 <- lag(lancaster$Sales, 3)
+# lancaster$Sales_Lag7 <- lag(lancaster$Sales, 7)
+# lancaster$Sales_Lag28 <- lag(lancaster$Sales, 28)
+# lancaster <- na.omit(lancaster)
+# 
+# philadelphia$Sales_Lag1 <- lag(philadelphia$Sales, 1)
+# philadelphia$Sales_Lag3 <- lag(philadelphia$Sales, 3)
+# philadelphia$Sales_Lag7 <- lag(philadelphia$Sales, 7)
+# philadelphia$Sales_Lag28 <- lag(philadelphia$Sales, 28)
+# philadelphia <- na.omit(philadelphia)
+# 
+# richmond$Sales_Lag1 <- lag(richmond$Sales, 1)
+# richmond$Sales_Lag3 <- lag(richmond$Sales, 3)
+# richmond$Sales_Lag7 <- lag(richmond$Sales, 7)
+# richmond$Sales_Lag28 <- lag(richmond$Sales, 28)
+# richmond <- na.omit(richmond)
+```
+
 
 ```{r}
 # Check if the Tourist Event has impact in the Number of Customers
