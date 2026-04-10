@@ -681,67 +681,43 @@ richmond <- richmond %>% select(-c("Sales_per_Customer"))
 ```
 
 ```{r}
-# Create the Lags for Sales and Num_Customers based of PACF and CCF
+# Create the Lags for the Num_Customers -> Univariate & Multivariate
 
-baltimore$Sales_Lag1 <- lag(baltimore$Sales, 1)
-baltimore$Sales_Lag3 <- lag(baltimore$Sales, 3)
-baltimore$Sales_Lag7 <- lag(baltimore$Sales, 7)
-baltimore$Sales_Lag28 <- lag(baltimore$Sales, 28)
+cities <- list(baltimore = baltimore, lancaster = lancaster, philadelphia = philadelphia, richmond = richmond)
+uni_lags <- 28
 
-baltimore$Num_Customers_Lag1 <- lag(baltimore$Num_Customers, 1)
+for (city in names(cities)) {
+  df <- cities[[city]]
+  
+  s_mat <- CasesSeries(df$Sales, c(1, 3, 7, 28))
+  c_mat <- CasesSeries(df$Num_Customers, 1:uni_lags)
+  colnames(c_mat) <- c(paste0("Num_Customers_Lag", 28:1), "Num_Customers")
 
-baltimore <- na.omit(baltimore)
+  df <- df[(uni_lags + 1):nrow(df), ]
 
+  df$Sales_Lag1 <- s_mat[, 4]
+  df$Sales_Lag3 <- s_mat[, 3]
+  df$Sales_Lag7 <- s_mat[, 2]
+  df$Sales_Lag28 <- s_mat[, 1]
 
-lancaster$Sales_Lag1 <- lag(lancaster$Sales, 1)
-lancaster$Sales_Lag3 <- lag(lancaster$Sales, 3)
-lancaster$Sales_Lag7 <- lag(lancaster$Sales, 7)
-lancaster$Sales_Lag28 <- lag(lancaster$Sales, 28)
+  df$Num_Customers <- NULL
+  df <- cbind(df, c_mat)
+  print(colnames(df))
 
-lancaster$Num_Customers_Lag1 <- lag(lancaster$Num_Customers, 1)
+  # Univariate
+  df %>%
+    select(Date, starts_with("Num_Customers")) %>%
+    saveRDS(paste0("data_clean/", city, "_uni.rds"))
 
-lancaster <- na.omit(lancaster)
+  df %>%
+    select(-c(starts_with("Num_Customers_Lag")[1:27])) %>%
+    select(-c("Sales", "TouristEvent")) %>%
+    saveRDS(paste0("data_clean/", city, "_multi.rds"))
 
-
-philadelphia$Sales_Lag1 <- lag(philadelphia$Sales, 1)
-philadelphia$Sales_Lag3 <- lag(philadelphia$Sales, 3)
-philadelphia$Sales_Lag7 <- lag(philadelphia$Sales, 7)
-philadelphia$Sales_Lag28 <- lag(philadelphia$Sales, 28)
-
-philadelphia$Num_Customers_Lag1 <- lag(philadelphia$Num_Customers, 1)
-
-philadelphia <- na.omit(philadelphia)
-
-
-richmond$Sales_Lag1 <- lag(richmond$Sales, 1)
-richmond$Sales_Lag3 <- lag(richmond$Sales, 3)
-richmond$Sales_Lag7 <- lag(richmond$Sales, 7)
-richmond$Sales_Lag28 <- lag(richmond$Sales, 28)
-
-richmond$Num_Customers_Lag1 <- lag(richmond$Num_Customers, 1)
-
-richmond <- na.omit(richmond)
+  cat("Completed successfully:", city, "\n")
+}
 ```
-
-```{r}
-# Remover Sales and TouristEvent features from the dataset
-baltimore <- baltimore %>% select(-c("Sales", "TouristEvent"))
-lancaster <- lancaster %>% select(-c("Sales", "TouristEvent"))
-philadelphia <- philadelphia %>% select(-c("Sales", "TouristEvent"))
-richmond <- richmond %>% select(-c("Sales", "TouristEvent"))
-```
-
-```{r}
-colnames(baltimore)
-```
-
-```{r}
-saveRDS(baltimore, "data_clean/baltimore.rds")
-saveRDS(lancaster, "data_clean/lancaster.rds")
-saveRDS(philadelphia, "data_clean/philadelphia.rds")
-saveRDS(richmond, "data_clean/richmond.rds")
-```
-
+x
 To transition the fully preprocessed datasets from the Exploratory Data Analysis (EDA) and Feature Engineering pipeline into the predictive modeling script, the data was exported using the native R Data Serialization format (`.rds`) rather than the standard `.csv` format.
 
 Unlike `.csv` files, which store information as plain text and strip away structural metadata, the `.rds` format preserves the exact in-memory state of the R objects. This is a critical practice in Time Series forecasting, as it ensures that strictly defined data types—such as chronological `Date` objects, logical booleans, and engineered numerical lags—retain their precise formatting. 
