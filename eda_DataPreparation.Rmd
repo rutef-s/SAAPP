@@ -391,35 +391,6 @@ Importantly, consistent and statistically significant delayed effects are observ
 This pattern is consistent across the stores, reinforcing the conclusion that historical sales act as a powerful advanced indicator. Consequently, incorporating **Lags 1, 3, 7, and 28** of the *Sales* variable is highly recommended for the modeling phase to capture daily inertia, weekly routines, and monthly purchasing cycles.
 
 ```{r}
-## Create the Lags for Sales
-### ---- NOTA IMPORTANTE ----: Depois de vermos quais lags usar de cada variável é que corremos este código para não perder dados importantíssimos
-# baltimore$Sales_Lag1 <- lag(baltimore$Sales, 1)
-# baltimore$Sales_Lag3 <- lag(baltimore$Sales, 3)
-# baltimore$Sales_Lag7 <- lag(baltimore$Sales, 7)
-# baltimore$Sales_Lag28 <- lag(baltimore$Sales, 28)
-# baltimore <- na.omit(baltimore)
-# 
-# lancaster$Sales_Lag1 <- lag(lancaster$Sales, 1)
-# lancaster$Sales_Lag3 <- lag(lancaster$Sales, 3)
-# lancaster$Sales_Lag7 <- lag(lancaster$Sales, 7)
-# lancaster$Sales_Lag28 <- lag(lancaster$Sales, 28)
-# lancaster <- na.omit(lancaster)
-# 
-# philadelphia$Sales_Lag1 <- lag(philadelphia$Sales, 1)
-# philadelphia$Sales_Lag3 <- lag(philadelphia$Sales, 3)
-# philadelphia$Sales_Lag7 <- lag(philadelphia$Sales, 7)
-# philadelphia$Sales_Lag28 <- lag(philadelphia$Sales, 28)
-# philadelphia <- na.omit(philadelphia)
-# 
-# richmond$Sales_Lag1 <- lag(richmond$Sales, 1)
-# richmond$Sales_Lag3 <- lag(richmond$Sales, 3)
-# richmond$Sales_Lag7 <- lag(richmond$Sales, 7)
-# richmond$Sales_Lag28 <- lag(richmond$Sales, 28)
-# richmond <- na.omit(richmond)
-```
-
-
-```{r}
 # Check if the Tourist Event has impact in the Number of Customers
 boxplot(Num_Customers ~ TouristEvent, data = baltimore)
 title("Baltimore")
@@ -687,7 +658,92 @@ normalVsOutliers_visualization(
 )
 ```
 
+```{r}
+cat("Number of NA for Baltimore: ",sum(is.na(baltimore$Sales_per_Customer)), "\n")
+cat("Number of NA for Lancaster: ",sum(is.na(lancaster$Sales_per_Customer)), "\n")
+cat("Number of NA for Philadelphia: ",sum(is.na(philadelphia$Sales_per_Customer)), "\n")
+cat("Number of NA for Richmond: ",sum(is.na(richmond$Sales_per_Customer)), "\n")
+```
+
+During the Exploratory Data Analysis (EDA) phase, an auxiliary feature—`Sales_per_Customer`—was engineered to analyze consumer behavior and purchasing power during specific promotional events. While highly valuable for descriptive analytics, this variable must be explicitly removed before the feature engineering and modeling phases for two critical reasons:
+
+1. **Handling Indeterminate Mathematical Forms (`NaN` / `Inf`):** On days when the store was closed (e.g., Christmas) and recorded 0 customers and 0 sales, calculating this ratio resulted in division-by-zero errors. If left in the dataset, the final `na.omit()` function used to clean the initial lag period would silently delete these intermediate rows, disrupting the chronological continuity of the time series.
+
+2. **Preventing Severe Data Leakage:** Retaining `Sales_per_Customer` in the training set introduces critical **Data Leakage**. Because its calculation explicitly requires the `Num_Customers` (the Target) and `Sales` (the Endogenous variable) of the *current* day, feeding it to the model would essentially provide the algorithm with the exact answer it is trying to predict. 
+
+**Resolution:** To maintain strict predictive integrity and structural continuity, purely analytical features like `Sales_per_Customer` are definitively dropped from the dataset *before* the lag generation process. Conversely, the contemporaneous `Sales` variable is removed strictly *after* its temporal lags are generated, as it is required for their calculation. This two-step removal process ensures the algorithm learns exclusively from valid historical data and fully prevents data leakage.
+
+```{r}
+baltimore <- baltimore %>% select(-c("Sales_per_Customer"))
+lancaster <- lancaster %>% select(-c("Sales_per_Customer"))
+philadelphia <- philadelphia %>% select(-c("Sales_per_Customer"))
+richmond <- richmond %>% select(-c("Sales_per_Customer"))
+```
+
+```{r}
+# Create the Lags for Sales and Num_Customers based of PACF and CCF
+
+baltimore$Sales_Lag1 <- lag(baltimore$Sales, 1)
+baltimore$Sales_Lag3 <- lag(baltimore$Sales, 3)
+baltimore$Sales_Lag7 <- lag(baltimore$Sales, 7)
+baltimore$Sales_Lag28 <- lag(baltimore$Sales, 28)
+
+baltimore$Num_Customers_Lag1 <- lag(baltimore$Num_Customers, 1)
+
+baltimore <- na.omit(baltimore)
 
 
+lancaster$Sales_Lag1 <- lag(lancaster$Sales, 1)
+lancaster$Sales_Lag3 <- lag(lancaster$Sales, 3)
+lancaster$Sales_Lag7 <- lag(lancaster$Sales, 7)
+lancaster$Sales_Lag28 <- lag(lancaster$Sales, 28)
+
+lancaster$Num_Customers_Lag1 <- lag(lancaster$Num_Customers, 1)
+
+lancaster <- na.omit(lancaster)
 
 
+philadelphia$Sales_Lag1 <- lag(philadelphia$Sales, 1)
+philadelphia$Sales_Lag3 <- lag(philadelphia$Sales, 3)
+philadelphia$Sales_Lag7 <- lag(philadelphia$Sales, 7)
+philadelphia$Sales_Lag28 <- lag(philadelphia$Sales, 28)
+
+philadelphia$Num_Customers_Lag1 <- lag(philadelphia$Num_Customers, 1)
+
+philadelphia <- na.omit(philadelphia)
+
+
+richmond$Sales_Lag1 <- lag(richmond$Sales, 1)
+richmond$Sales_Lag3 <- lag(richmond$Sales, 3)
+richmond$Sales_Lag7 <- lag(richmond$Sales, 7)
+richmond$Sales_Lag28 <- lag(richmond$Sales, 28)
+
+richmond$Num_Customers_Lag1 <- lag(richmond$Num_Customers, 1)
+
+richmond <- na.omit(richmond)
+```
+
+```{r}
+# Remover Sales and TouristEvent features from the dataset
+baltimore <- baltimore %>% select(-c("Sales", "TouristEvent"))
+lancaster <- lancaster %>% select(-c("Sales", "TouristEvent"))
+philadelphia <- philadelphia %>% select(-c("Sales", "TouristEvent"))
+richmond <- richmond %>% select(-c("Sales", "TouristEvent"))
+```
+
+```{r}
+colnames(baltimore)
+```
+
+```{r}
+saveRDS(baltimore, "data_clean/baltimore.rds")
+saveRDS(lancaster, "data_clean/lancaster.rds")
+saveRDS(philadelphia, "data_clean/philadelphia.rds")
+saveRDS(richmond, "data_clean/richmond.rds")
+```
+
+To transition the fully preprocessed datasets from the Exploratory Data Analysis (EDA) and Feature Engineering pipeline into the predictive modeling script, the data was exported using the native R Data Serialization format (`.rds`) rather than the standard `.csv` format.
+
+Unlike `.csv` files, which store information as plain text and strip away structural metadata, the `.rds` format preserves the exact in-memory state of the R objects. This is a critical practice in Time Series forecasting, as it ensures that strictly defined data types—such as chronological `Date` objects, logical booleans, and engineered numerical lags—retain their precise formatting. 
+
+Utilizing `.rds` eliminates the need for redundant type-casting (data type conversions) upon re-importation, mitigates silent parsing errors, and ensures a seamless, structurally intact transition of the matrices into the machine learning pipeline.
