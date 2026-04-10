@@ -1,0 +1,25 @@
+---
+title: "Modelling"
+output: html_document
+date: "2026-04-10"
+---
+
+```{r}
+# Libraries
+library(rminer)
+```
+
+```{r}
+# Get Data
+baltimore_uni <- readRDS("data_clean/baltimore_uni.rds")
+baltimore_multi <- readRDS("data_clean/baltimore_multi.rds")
+
+lancaster_uni <- readRDS("data_clean/lancaster_uni.rds")
+lancaster_multi <- readRDS("data_clean/lancaster_multi.rds")
+
+philadelphia_uni <- readRDS("data_clean/philadelphia_uni.rds")
+philadelphia_multi <- readRDS("data_clean/philadelphia_multi.rds")
+
+richmond_uni <- readRDS("data_clean/richmond_uni.rds")
+richmond_multi <- readRDS("data_clean/richmond_multi.rds")
+```
