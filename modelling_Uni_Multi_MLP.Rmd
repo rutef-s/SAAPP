@@ -297,75 +297,6 @@ conv_ts <- function(x, frequency=1, labels=NULL) {
   return(x)
 }
 
-autoVAR <- function(mtr, lag.max=10, type="const", season=NULL, exogen=NULL) {
-  if (!is.ts(mtr)) mtr <- conv_ts(mtr)
-  if (!is.null(exogen)) {
-    if (!is.ts(exogen)) exogen <- conv_ts(exogen)
-    mvar <- VAR(mtr, type=type, season=season, exogen=exogen, lag.max=lag.max, ic="SC")
-  } else {
-    mvar <- VAR(mtr, type=type, season=season, lag.max=lag.max, ic="SC")
-  }
-  return(mvar)
-}
-
-forecastVAR <- function(model, h=10, exogen=NULL) {
-  models <- length(model$varresult)
-  res    <- vector("list", length=models)
-  if (!is.null(exogen)) {
-    if (!is.ts(exogen)) exogen <- conv_ts(exogen)
-    # Atribuir ao ambiente global com nome fixo para o vars::predict o encontrar
-    assign("exogen_dumvar", exogen, envir=.GlobalEnv)
-    F1 <- predict(model, n.ahead=h, dumvar=get("exogen_dumvar", envir=.GlobalEnv))
-    rm("exogen_dumvar", envir=.GlobalEnv)
-  } else {
-    F1 <- predict(model, n.ahead=h)
-  }
-  for (i in 1:models) res[[i]] <- as.numeric(F1$fcst[[i]][,1])
-  return(res)
-}
-
-autoARIMAX <- function(mtr, frequency=1, exogen=NULL) {
-  if (!is.ts(mtr)) mtr <- conv_ts(mtr)
-  models <- ncol(mtr)
-  nr     <- nrow(mtr)
-  nmtr   <- attr(mtr, "dimnames")[[2]]
-  res    <- vector("list", length=models)
-  res2   <- vector("list", length=models)
-  if (!is.null(exogen)) {
-    if (!is.ts(exogen)) exogen <- conv_ts(exogen, frequency=frequency)
-  }
-  for (i in 1:models) {
-    if (frequency > 1) s_tr <- ts(mtr[1:nr,i], frequency=frequency) else s_tr <- ts(mtr[1:nr,i])
-    xreg <- ts(mtr[1:nr,-i], frequency=frequency)
-    if (!is.null(exogen)) xreg <- cbind(xreg, exogen)
-    attr(xreg, "dimnames")[[2]] <- c(nmtr[-i], attr(exogen, "dimnames")[[2]])
-    res[[i]]  <- auto.arima(s_tr, xreg=xreg)
-    res2[[i]] <- auto.arima(s_tr)
-  }
-  return(list(arimax=res, arima=res2, frequency2=frequency))
-}
-
-forecastARIMAX <- function(model, h=10, exogen=NULL) {
-  models <- length(model$arimax)
-  res    <- vector("list", length=models)
-  xreg   <- matrix(ncol=models, nrow=h)
-  for (i in 1:models) xreg[,i] <- forecast(model$arima[[i]], h=h)$mean
-  if (!is.null(exogen)) {
-    if (!is.ts(exogen)) exogen <- conv_ts(exogen, frequency=model$frequency2)
-  }
-  for (i in 1:models) {
-    if (length(xreg[1,-i]) == 1) { xaux <- matrix(ncol=1, nrow=h); xaux[,1] <- xreg[,-i] }
-    else xaux <- as.matrix(xreg[,-i])
-    narimax <- names(model$arimax[[i]]$coef)
-    xaux    <- ts(xaux, frequency=model$frequency2)
-    if (!is.null(exogen)) xaux <- as.matrix(cbind(xaux, exogen))
-    attr(xaux, "dimnames")[[2]] <- narimax[(length(narimax)-ncol(xaux)+1):length(narimax)]
-    F1      <- forecast(model$arimax[[i]], h=h, xreg=xaux)
-    res[[i]] <- as.numeric(F1$mean)
-  }
-  return(res)
-}
-
 vreverse <- function(x) x[length(x):1]
 
 mfit <- function(mtr, model, VINP, exogen=NULL) {
@@ -507,14 +438,14 @@ prepare_exogenous <- function(df_multi, n_rows) {
 
 ```{r}
 # ═══════════════════════════════════════════════════════════════════════════
-# FASE I — Multivariado
+# FASE I — Multivariado (apenas MLPE)
 # ═══════════════════════════════════════════════════════════════════════════
 forecast_multi_phaseI <- function(df_multi, loja_nome, npred=NPRED) {
   mtr_end <- prepare_endogenous(df_multi)
   N       <- nrow(mtr_end)
   exogen  <- prepare_exogenous(df_multi, N)
-  hd   <- holdout(mtr_end[,1], ratio=npred, mode="order")
-  Y    <- mtr_end[hd$ts,]
+  hd      <- holdout(mtr_end[,1], ratio=npred, mode="order")
+  Y       <- mtr_end[hd$ts,]
   mtr_tr  <- ts(mtr_end[hd$tr,], frequency=K)
   exotr   <- if (!is.null(exogen)) exogen[hd$tr,,drop=FALSE] else NULL
   exots   <- if (!is.null(exogen)) exogen[hd$ts,,drop=FALSE] else NULL
@@ -522,47 +453,23 @@ forecast_multi_phaseI <- function(df_multi, loja_nome, npred=NPRED) {
   cat("\n======", loja_nome, "(Multivariado Fase I) ======\n")
   cat("N:", N, "| Treino:", length(hd$tr), "| Teste:", npred, "\n")
 
-  # ── VAR ──────────────────────────────────────────────────────────────────
-  cat(">> VAR\n")
-  mvar <- suppressWarnings(autoVAR(mtr_tr))
-  FV   <- forecastVAR(mvar, h=npred)
-  fshow_multi(Y, FV[[1]], FV[[2]], "VAR", loja_nome)
-
-  # ── ARIMAX com fallback para ARIMA puro se falhar ─────────────────────────
-  cat(">> ARIMAX\n")
-  arimax_result <- tryCatch({
-    arimax <- suppressWarnings(autoARIMAX(mtr_tr, frequency=K, exogen=exotr))
-    suppressWarnings(forecastARIMAX(arimax, h=npred, exogen=exots))
-  }, error = function(e) {
-    cat("  [ARIMAX falhou — usando ARIMA puro]\n")
-    res <- vector("list", length=2)
-    for (i in 1:2) {
-      s_tr    <- ts(mtr_tr[,i], frequency=K)
-      m       <- suppressWarnings(auto.arima(s_tr))
-      res[[i]] <- as.numeric(forecast(m, h=npred)$mean)
-    }
-    res
-  })
-  fshow_multi(Y, arimax_result[[1]], arimax_result[[2]], "ARIMAX", loja_nome)
-
   # ── Multivariate MLPE ────────────────────────────────────────────────────
   cat(">> Multivariate MLPE\n")
   MNN  <- mfit(mtr_end[hd$tr,], "mlpe", VINP, exogen=exotr)
   Pred <- lforecastm(MNN, h=npred, exogen=exots)
   fshow_multi(Y, Pred[[1]], Pred[[2]], "MLPE", loja_nome)
 
-  return(list(Y=Y, VAR=FV, ARIMAX=arimax_result, MLPE=Pred))
+  return(list(Y=Y, MLPE=Pred))
 }
 
 res_multi_balt <- forecast_multi_phaseI(baltimore_multi,    "Baltimore")
 res_multi_lanc <- forecast_multi_phaseI(lancaster_multi,    "Lancaster")
 res_multi_phil <- forecast_multi_phaseI(philadelphia_multi, "Philadelphia")
 res_multi_rich <- forecast_multi_phaseI(richmond_multi,     "Richmond")
-```
 
-```{r}
+
 # ═══════════════════════════════════════════════════════════════════════════
-# FASE II — Backtesting Rolling Window Multivariado
+# FASE II — Backtesting Rolling Window Multivariado (apenas MLPE)
 # ═══════════════════════════════════════════════════════════════════════════
 backtesting_multi <- function(df_multi, loja_nome,
                               npred=NPRED, w_semanas=W_SEMANAS, step=7) {
@@ -578,154 +485,102 @@ backtesting_multi <- function(df_multi, loja_nome,
   cat("Loja:", loja_nome, "| N:", N,
       "| W:", W, "dias (", w_semanas, "sem.) | runs:", runs, "\n")
 
-  ev_var    <- numeric(runs)
-  ev_arimax <- numeric(runs)
-  ev_mlpe   <- numeric(runs)
-  ev_sn     <- numeric(runs)
-  all_Y <- c(); all_VAR <- c(); all_ARIMAX <- c(); all_MLPE <- c()
+  ev_mlpe <- numeric(runs)
+  ev_sn   <- numeric(runs)
+  all_Y   <- c(); all_MLPE <- c()
 
   for (b in 1:runs) {
 
-  H2 <- holdout(mtr_end[,1], ratio=npred, mode="rolling",
-                iter=b, window=W, increment=step)
+    H2 <- holdout(mtr_end[,1], ratio=npred, mode="rolling",
+                  iter=b, window=W, increment=step)
 
-  mtr_tr <- ts(mtr_end[H2$tr,], frequency=K)
-  Y_real <- mtr_end[H2$ts, 1]
+    Y_real <- mtr_end[H2$ts, 1]
+    exotr  <- if (!is.null(exogen)) exogen[H2$tr,,drop=FALSE] else NULL
+    exots  <- if (!is.null(exogen)) exogen[H2$ts,,drop=FALSE] else NULL
 
-  exotr <- if (!is.null(exogen)) exogen[H2$tr,,drop=FALSE] else NULL
-  exots <- if (!is.null(exogen)) exogen[H2$ts,,drop=FALSE] else NULL
+    # MLPE multivariado
+    MNN    <- mfit(mtr_end[H2$tr,], "mlpe", VINP, exogen=exotr)
+    Pred   <- lforecastm(MNN, h=npred, exogen=exots)
+    P_mlpe <- Pred[[1]]
 
-  # VAR — sem exógenas
-  mvar  <- suppressWarnings(autoVAR(mtr_tr))
-  FV    <- forecastVAR(mvar, h=npred)
-  P_var <- FV[[1]]
+    # Seasonal Naive
+    P_sn <- mtr_end[(H2$ts[1] - npred):(H2$ts[1] - 1), 1]
 
-  # ARIMAX — com fallback para ARIMA puro se falhar
-  arimax_result <- tryCatch({
-    arimax <- suppressWarnings(autoARIMAX(mtr_tr, frequency=K, exogen=exotr))
-    suppressWarnings(forecastARIMAX(arimax, h=npred, exogen=exots))
-  }, error = function(e) {
-    cat("  [ARIMAX falhou na iter", b, "— usando ARIMA puro]\n")
-    res <- vector("list", length=2)
-    for (i in 1:2) {
-      s_tr <- ts(mtr_tr[,i], frequency=K)
-      m    <- suppressWarnings(auto.arima(s_tr))
-      res[[i]] <- as.numeric(forecast(m, h=npred)$mean)
-    }
-    res
-  })
-  P_arimax <- arimax_result[[1]]
+    ev_mlpe[b] <- mmetric(Y_real, P_mlpe, metric="NMAE", val=srange_c)
+    ev_sn[b]   <- mmetric(Y_real, P_sn,   metric="NMAE", val=srange_c)
 
-  # MLPE multivariado
-  MNN    <- mfit(mtr_end[H2$tr,], "mlpe", VINP, exogen=exotr)
-  Pred   <- lforecastm(MNN, h=npred, exogen=exots)
-  P_mlpe <- Pred[[1]]
+    cat("Iter:", b,
+        "| TS:", H2$ts[1], "->", tail(H2$ts,1),
+        "| MLPE:", round(ev_mlpe[b],1),
+        " SN:", round(ev_sn[b],1), "\n")
 
-  # Seasonal Naive
-  P_sn <- mtr_end[(H2$ts[1] - npred):(H2$ts[1] - 1), 1]
-
-  ev_var[b]    <- mmetric(Y_real, P_var,    metric="NMAE", val=srange_c)
-  ev_arimax[b] <- mmetric(Y_real, P_arimax, metric="NMAE", val=srange_c)
-  ev_mlpe[b]   <- mmetric(Y_real, P_mlpe,   metric="NMAE", val=srange_c)
-  ev_sn[b]     <- mmetric(Y_real, P_sn,     metric="NMAE", val=srange_c)
-
-  cat("Iter:", b,
-      "| VAR:", round(ev_var[b],1),
-      " ARIMAX:", round(ev_arimax[b],1),
-      " MLPE:", round(ev_mlpe[b],1),
-      " SN:", round(ev_sn[b],1), "\n")
-
-  all_Y      <- c(all_Y,      Y_real)
-  all_VAR    <- c(all_VAR,    P_var)
-  all_ARIMAX <- c(all_ARIMAX, P_arimax)
-  all_MLPE   <- c(all_MLPE,   P_mlpe)
-}
+    all_Y    <- c(all_Y,    Y_real)
+    all_MLPE <- c(all_MLPE, P_mlpe)
+  }
 
   cat("\n---", loja_nome, "(Multivariado) ---\n")
-  cat("VAR    mediana NMAE:", round(median(ev_var),    2), "%\n")
-  cat("ARIMAX mediana NMAE:", round(median(ev_arimax), 2), "%\n")
-  cat("MLPE   mediana NMAE:", round(median(ev_mlpe),   2), "%\n")
-  cat("SN     mediana NMAE:", round(median(ev_sn),     2), "%\n")
-
-  best_nmae <- min(median(ev_var), median(ev_arimax), median(ev_mlpe))
-  best_name <- c("VAR","ARIMAX","MLPE")[which.min(c(median(ev_var),
-                                                     median(ev_arimax),
-                                                     median(ev_mlpe)))]
-  cat("Melhor modelo:", best_name, "\n")
+  cat("MLPE mediana NMAE:", round(median(ev_mlpe), 2), "%\n")
+  cat("SN   mediana NMAE:", round(median(ev_sn),   2), "%\n")
+  cat("Melhor modelo:", ifelse(median(ev_mlpe) <= median(ev_sn), "MLPE", "SN"), "\n")
   cat("Melhoria vs SN:",
-      round((median(ev_sn) - best_nmae) / median(ev_sn) * 100, 1), "%\n")
+      round((median(ev_sn) - median(ev_mlpe)) / median(ev_sn) * 100, 1), "%\n")
 
-  # Gráfico agregado
   plot(all_Y, type="l", col="black",
-       main=paste0(loja_nome, " Multi — Rolling Window (", runs, " iterações)"),
+       main=paste0(loja_nome, " Multi MLPE — Rolling Window (", runs, " iterações)"),
        ylab="Num_Customers", xlab="Observações de teste acumuladas")
-  lines(all_VAR,    col="blue",  lty=2)
-  lines(all_ARIMAX, col="green", lty=3)
-  lines(all_MLPE,   col="red",   lty=4)
-  legend("topright", c("Real","VAR","ARIMAX","MLPE"),
-         col=c("black","blue","green","red"), lty=c(1,2,3,4))
+  lines(all_MLPE, col="red", lty=2)
+  legend("topright", c("Real","MLPE"),
+         col=c("black","red"), lty=c(1,2))
 
-  return(list(ev_var=ev_var, ev_arimax=ev_arimax,
-              ev_mlpe=ev_mlpe, ev_sn=ev_sn))
+  return(list(ev_mlpe=ev_mlpe, ev_sn=ev_sn))
 }
 
 bt_multi_balt <- backtesting_multi(baltimore_multi,    "Baltimore")
 bt_multi_lanc <- backtesting_multi(lancaster_multi,    "Lancaster")
 bt_multi_phil <- backtesting_multi(philadelphia_multi, "Philadelphia")
 bt_multi_rich <- backtesting_multi(richmond_multi,     "Richmond")
-```
 
-```{r}
+
 # ── Gráfico de métricas por iteração ───────────────────────────────────────
 plot_metricas_multi <- function(bt_result, loja_nome) {
-  runs  <- length(bt_result$ev_var)
+  runs  <- length(bt_result$ev_mlpe)
   iters <- 1:runs
-  ylim  <- range(c(bt_result$ev_var, bt_result$ev_arimax,
-                   bt_result$ev_mlpe, bt_result$ev_sn))
-  plot(iters, bt_result$ev_var, type="b", col="blue",  pch=19, lty=1,
+  ylim  <- range(c(bt_result$ev_mlpe, bt_result$ev_sn))
+
+  plot(iters, bt_result$ev_mlpe, type="b", col="red", pch=19, lty=1,
        ylim=ylim,
        main=paste0(loja_nome, " Multi — NMAE por iteração"),
        xlab="Iteração", ylab="NMAE (%)")
-  lines(iters, bt_result$ev_arimax, type="b", col="green", pch=17, lty=2)
-  lines(iters, bt_result$ev_mlpe,   type="b", col="red",   pch=15, lty=3)
-  lines(iters, bt_result$ev_sn,     type="b", col="black", pch=18, lty=4)
-  abline(h=median(bt_result$ev_var),    col="blue",  lty=2, lwd=1.5)
-  abline(h=median(bt_result$ev_arimax), col="green", lty=2, lwd=1.5)
-  abline(h=median(bt_result$ev_mlpe),   col="red",   lty=2, lwd=1.5)
-  abline(h=median(bt_result$ev_sn),     col="black", lty=2, lwd=1.5)
+  lines(iters, bt_result$ev_sn, type="b", col="black", pch=15, lty=2)
+  abline(h=median(bt_result$ev_mlpe), col="red",   lty=2, lwd=1.5)
+  abline(h=median(bt_result$ev_sn),   col="black", lty=2, lwd=1.5)
   legend("topright",
-         c(paste0("VAR (med=",    round(median(bt_result$ev_var),1),    "%)"),
-           paste0("ARIMAX (med=", round(median(bt_result$ev_arimax),1), "%)"),
-           paste0("MLPE (med=",   round(median(bt_result$ev_mlpe),1),   "%)"),
-           paste0("SN (med=",     round(median(bt_result$ev_sn),1),     "%)")),
-         col=c("blue","green","red","black"), lty=c(1,2,3,4), pch=c(19,17,15,18))
+         c(paste0("MLPE (med=", round(median(bt_result$ev_mlpe),1), "%)"),
+           paste0("SN (med=",   round(median(bt_result$ev_sn),1),   "%)")),
+         col=c("red","black"), lty=c(1,2), pch=c(19,15))
 }
 
 plot_metricas_multi(bt_multi_balt,  "Baltimore")
 plot_metricas_multi(bt_multi_lanc,  "Lancaster")
 plot_metricas_multi(bt_multi_phil,  "Philadelphia")
 plot_metricas_multi(bt_multi_rich,  "Richmond")
-```
 
-```{r}
+
 # ── Tabela resumo multivariado ──────────────────────────────────────────────
 resultados_multi <- data.frame(
-  Loja        = c("Baltimore","Lancaster","Philadelphia","Richmond"),
-  VAR_NMAE    = c(median(bt_multi_balt$ev_var),    median(bt_multi_lanc$ev_var),
-                  median(bt_multi_phil$ev_var),    median(bt_multi_rich$ev_var)),
-  ARIMAX_NMAE = c(median(bt_multi_balt$ev_arimax), median(bt_multi_lanc$ev_arimax),
-                  median(bt_multi_phil$ev_arimax), median(bt_multi_rich$ev_arimax)),
-  MLPE_NMAE   = c(median(bt_multi_balt$ev_mlpe),   median(bt_multi_lanc$ev_mlpe),
-                  median(bt_multi_phil$ev_mlpe),   median(bt_multi_rich$ev_mlpe)),
-  SN_NMAE     = c(median(bt_multi_balt$ev_sn),     median(bt_multi_lanc$ev_sn),
-                  median(bt_multi_phil$ev_sn),     median(bt_multi_rich$ev_sn))
+  Loja      = c("Baltimore","Lancaster","Philadelphia","Richmond"),
+  MLPE_NMAE = c(median(bt_multi_balt$ev_mlpe), median(bt_multi_lanc$ev_mlpe),
+                median(bt_multi_phil$ev_mlpe), median(bt_multi_rich$ev_mlpe)),
+  SN_NMAE   = c(median(bt_multi_balt$ev_sn),   median(bt_multi_lanc$ev_sn),
+                median(bt_multi_phil$ev_sn),   median(bt_multi_rich$ev_sn))
 )
 
-resultados_multi$Melhor <- apply(resultados_multi[,2:4], 1,
-                                  function(x) c("VAR","ARIMAX","MLPE")[which.min(x)])
+resultados_multi$Melhor <- ifelse(resultados_multi$MLPE_NMAE <= resultados_multi$SN_NMAE,
+                                   "MLPE", "SN")
 resultados_multi$Melhoria_pct <- round(
-  (resultados_multi$SN_NMAE - apply(resultados_multi[,2:4], 1, min)) /
+  (resultados_multi$SN_NMAE - resultados_multi$MLPE_NMAE) /
    resultados_multi$SN_NMAE * 100, 1)
 
 print(resultados_multi)
 ```
+
