@@ -1,0 +1,731 @@
+---
+title: "Modelling"
+output: html_document
+date: "2026-04-10"
+---
+
+```{r}
+# Libraries
+library(rminer)
+```
+
+```{r}
+# Get Data
+baltimore_uni <- readRDS("data_clean/baltimore_uni.rds")
+baltimore_multi <- readRDS("data_clean/baltimore_multi.rds")
+
+lancaster_uni <- readRDS("data_clean/lancaster_uni.rds")
+lancaster_multi <- readRDS("data_clean/lancaster_multi.rds")
+
+philadelphia_uni <- readRDS("data_clean/philadelphia_uni.rds")
+philadelphia_multi <- readRDS("data_clean/philadelphia_multi.rds")
+
+richmond_uni <- readRDS("data_clean/richmond_uni.rds")
+richmond_multi <- readRDS("data_clean/richmond_multi.rds")
+```
+
+
+```{r}
+
+# ── Parâmetros globais ──────────────────────────────────────────────────────
+NPRED  <- 7          # horizonte: 1 semana
+LAGS   <- c(1, 2, 7) # lags definidos pela análise ACF/PACF
+# (podes testar também c(1,7) ou c(1:7) e comparar)
+
+# ── Função auxiliar: forecast univariado para uma loja (Fase I) ─────────────
+forecast_univariate_phaseI <- function(serie, loja_nome, lags = LAGS, npred = NPRED) {
+  
+  S      <- serie
+  srange <- as.numeric(diff(quantile(S, probs=c(0.01, 0.99))))
+  
+  # Converter série em data.frame com lags (inputs) e y (target)
+  D  <- CasesSeries(S, lags)
+  N  <- nrow(D)
+  TR <- 1:(N - npred)     # treino: tudo exceto últimos 7 dias
+  TS <- (N - npred + 1):N # teste: última semana
+  
+  cat("\n======", loja_nome, "======\n")
+  cat("Total exemplos D:", N, "| Treino:", length(TR), "| Teste:", length(TS), "\n")
+  
+  # Treinar modelos
+  NN <- fit(y~., D[TR,], model = "mlpe",         search = "heuristic")
+  RF <- fit(y~., D[TR,], model = "randomForest",  search = "heuristic")
+  
+  # Previsões multi-step (lforecast propaga previsões anteriores como inputs)
+  START <- N - npred + 1
+  PNN   <- lforecast(NN, D, start = START, horizon = npred)
+  PRF   <- lforecast(RF, D, start = START, horizon = npred)
+  
+  # Baseline: Seasonal Naive (repete os últimos 7 valores conhecidos)
+  # Os últimos 7 valores conhecidos são os que precedem o período de teste na série original
+  PSN <- S[(length(S) - npred*2 + 1):(length(S) - npred)] # semana anterior
+
+  
+  Y <- D[TS,]$y # valores reais
+  
+  # Métricas
+  metrics_fn <- function(label, Pred) {
+    cat(label, "| MAE:", round(mmetric(Y, Pred, metric="MAE"), 2),
+        "| NMAE:", round(mmetric(Y, Pred, metric="NMAE", val=srange), 1), "%",
+        "| RMSE:", round(mmetric(Y, Pred, metric="RMSE"), 2),
+        "| R2:", round(mmetric(Y, Pred, metric="R22"), 3), "\n")
+  }
+  
+  metrics_fn("NN  ", PNN)
+  metrics_fn("RF  ", PRF)
+  metrics_fn("SN  ", PSN) # Seasonal Naive baseline
+  
+  # Melhoria vs Seasonal Naive (baseada em NMAE)
+  nmae_nn <- mmetric(Y, PNN, metric="NMAE", val=srange)
+  nmae_rf <- mmetric(Y, PRF, metric="NMAE", val=srange)
+  nmae_sn <- mmetric(Y, PSN, metric="NMAE", val=srange)
+  cat("Melhoria NN vs SN:", round((nmae_sn - nmae_nn) / nmae_sn * 100, 1), "%\n")
+  cat("Melhoria RF vs SN:", round((nmae_sn - nmae_rf) / nmae_sn * 100, 1), "%\n")
+  
+  # Gráfico predicted vs real
+  main_nn <- paste0(loja_nome, " NN (NMAE=", round(nmae_nn,1), "%, R²=", round(mmetric(Y,PNN,metric="R22"),2), ")")
+  mgraph(Y, PNN, graph="REG", main=main_nn, Grid=10,
+         col=c("black","blue"), lty=1,
+         leg=list(pos="topright", leg=c("real","NN pred.")))
+  
+  return(list(Y=Y, PNN=PNN, PRF=PRF, PSN=PSN, srange=srange))
+}
+
+# ── Aplicar a cada loja ─────────────────────────────────────────────────────
+res_balt  <- forecast_univariate_phaseI(baltimore_uni$Num_Customers,    "Baltimore")
+res_lanc  <- forecast_univariate_phaseI(lancaster_uni$Num_Customers,    "Lancaster")
+res_phil  <- forecast_univariate_phaseI(philadelphia_uni$Num_Customers, "Philadelphia")
+res_rich  <- forecast_univariate_phaseI(richmond_uni$Num_Customers,     "Richmond")
+```
+
+
+```{r}
+
+NPRED <- 7
+LAGS  <- c(1, 2, 7)
+W_SEMANAS <- 25  # ajusta entre 20 e 30 conforme preferires
+
+backtesting_univariate <- function(serie, loja_nome, lags=LAGS,
+                                   npred=NPRED, w_semanas=W_SEMANAS, step=7) {
+  S      <- serie
+  srange <- as.numeric(diff(quantile(S, probs=c(0.01, 0.99))))
+  D      <- CasesSeries(S, lags)
+  L      <- nrow(D)
+
+  W    <- w_semanas * 7
+  runs <- floor((L - npred - W) / step)
+
+  cat("Loja:", loja_nome, "| nrow(D):", L,
+      "| W:", W, "dias (", w_semanas, "semanas) | runs:", runs, "\n")
+
+  ev_nn <- numeric(runs)
+  ev_rf <- numeric(runs)
+  ev_sn <- numeric(runs)
+  all_Y <- c(); all_PNN <- c(); all_PRF <- c()
+
+  for (b in 1:runs) {
+
+    H2   <- holdout(D$y, ratio=npred, mode="rolling",
+                    iter=b, window=W, increment=step)
+    M_nn <- fit(y~., D[H2$tr,], model="mlpe",         search="heuristic")
+    M_rf <- fit(y~., D[H2$tr,], model="randomForest",  search="heuristic")
+    P_nn <- lforecast(M_nn, D, start=(length(H2$tr)+1), horizon=npred)
+    P_rf <- lforecast(M_rf, D, start=(length(H2$tr)+1), horizon=npred)
+
+    # Seasonal Naive correto: 7 dias imediatamente antes do teste na série original
+    inicio_teste_S <- H2$ts[1] + max(lags)
+    P_sn <- S[(inicio_teste_S - npred):(inicio_teste_S - 1)]
+
+    Y_real   <- D[H2$ts,]$y
+    ev_nn[b] <- mmetric(Y_real, P_nn, metric="NMAE", val=srange)
+    ev_rf[b] <- mmetric(Y_real, P_rf, metric="NMAE", val=srange)
+    ev_sn[b] <- mmetric(Y_real, P_sn, metric="NMAE", val=srange)
+
+    cat("Iter:", b,
+        "| TR:", H2$tr[1], "->", tail(H2$tr,1),
+        "| TS:", H2$ts[1], "->", tail(H2$ts,1),
+        "| NMAE NN:", round(ev_nn[b],1),
+        " RF:", round(ev_rf[b],1),
+        " SN:", round(ev_sn[b],1), "\n")
+
+    all_Y   <- c(all_Y,   Y_real)
+    all_PNN <- c(all_PNN, P_nn)
+    all_PRF <- c(all_PRF, P_rf)
+  }
+
+  cat("\n---", loja_nome, "---\n")
+  cat("NN  mediana NMAE:", round(median(ev_nn), 2), "%\n")
+  cat("RF  mediana NMAE:", round(median(ev_rf), 2), "%\n")
+  cat("SN  mediana NMAE:", round(median(ev_sn), 2), "%\n")
+
+  best_nmae <- min(median(ev_nn), median(ev_rf))
+  cat("Melhor modelo:", ifelse(median(ev_nn) <= median(ev_rf), "NN", "RF"), "\n")
+  cat("Melhoria vs Seasonal Naive:",
+      round((median(ev_sn) - best_nmae) / median(ev_sn) * 100, 1), "%\n")
+
+  plot(all_Y, type="l", col="black",
+       main=paste0(loja_nome, " — Rolling Window (", runs, " iterações)"),
+       ylab="Num_Customers", xlab="Observações de teste acumuladas")
+  lines(all_PNN, col="blue", lty=2)
+  lines(all_PRF, col="red",  lty=3)
+  legend("topright", c("Real","NN","RF"),
+         col=c("black","blue","red"), lty=c(1,2,3))
+
+  return(list(ev_nn=ev_nn, ev_rf=ev_rf, ev_sn=ev_sn))
+}
+```
+
+```{r}
+bt_balt  <- backtesting_univariate(baltimore_uni$Num_Customers,    "Baltimore")
+bt_lanc  <- backtesting_univariate(lancaster_uni$Num_Customers,    "Lancaster")
+bt_phil  <- backtesting_univariate(philadelphia_uni$Num_Customers, "Philadelphia")
+bt_rich  <- backtesting_univariate(richmond_uni$Num_Customers,     "Richmond")
+```
+
+```{r}
+# Tabela resumo para o relatório
+resultados <- data.frame(
+  Loja      = c("Baltimore","Lancaster","Philadelphia","Richmond"),
+  NN_NMAE   = c(median(bt_balt$ev_nn), median(bt_lanc$ev_nn),
+                median(bt_phil$ev_nn), median(bt_rich$ev_nn)),
+  RF_NMAE   = c(median(bt_balt$ev_rf), median(bt_lanc$ev_rf),
+                median(bt_phil$ev_rf), median(bt_rich$ev_rf)),
+  SN_NMAE   = c(median(bt_balt$ev_sn), median(bt_lanc$ev_sn),
+                median(bt_phil$ev_sn), median(bt_rich$ev_sn))
+)
+
+resultados$Melhor  <- ifelse(resultados$NN_NMAE <= resultados$RF_NMAE, "NN", "RF")
+resultados$Melhoria_pct <- round(
+  (resultados$SN_NMAE - pmin(resultados$NN_NMAE, resultados$RF_NMAE)) /
+   resultados$SN_NMAE * 100, 1)
+
+print(resultados)
+```
+
+
+```{r}
+plot_metricas <- function(bt_result, loja_nome) {
+  runs  <- length(bt_result$ev_nn)
+  iters <- 1:runs
+  ylim_nmae <- range(c(bt_result$ev_nn, bt_result$ev_rf, bt_result$ev_sn))
+  
+  plot(iters, bt_result$ev_nn, type="b", col="blue", pch=19, lty=1,
+       ylim=ylim_nmae,
+       main=paste0(loja_nome, " — NMAE por iteração"),
+       xlab="Iteração", ylab="NMAE (%)")
+  lines(iters, bt_result$ev_rf, type="b", col="red",   pch=17, lty=2)
+  lines(iters, bt_result$ev_sn, type="b", col="black", pch=15, lty=3)
+  abline(h=median(bt_result$ev_nn), col="blue",  lty=2, lwd=1.5)
+  abline(h=median(bt_result$ev_rf), col="red",   lty=2, lwd=1.5)
+  abline(h=median(bt_result$ev_sn), col="black", lty=2, lwd=1.5)
+  legend("topright",
+         c(paste0("NN (med=",  round(median(bt_result$ev_nn),1), "%)"),
+           paste0("RF (med=",  round(median(bt_result$ev_rf),1), "%)"),
+           paste0("SN (med=",  round(median(bt_result$ev_sn),1), "%)")),
+         col=c("blue","red","black"), lty=c(1,2,3), pch=c(19,17,15))
+}
+
+plot_metricas(bt_balt,  "Baltimore")
+plot_metricas(bt_lanc,  "Lancaster")
+plot_metricas(bt_phil,  "Philadelphia")
+plot_metricas(bt_rich,  "Richmond")
+```
+
+
+```{r}
+# ── Previsão final dos próximos 7 dias ──────────────────────────────────────
+previsao_final <- function(serie, loja_nome, lags=LAGS, npred=NPRED) {
+  
+  S <- serie
+  D <- CasesSeries(S, lags)
+  
+  # Treinar com TODOS os dados disponíveis
+  modelo_final <- fit(y~., D, model="randomForest", search="heuristic")
+  # (substitui randomForest pelo melhor modelo identificado na Fase II)
+  
+  # Prever os próximos 7 dias (1-ahead a 7-ahead)
+  START  <- nrow(D) + 1
+  P_final <- lforecast(modelo_final, D, start=START, horizon=npred)
+  
+  cat("\n===", loja_nome, "— Previsão próximos 7 dias ===\n")
+  for (i in 1:npred) {
+    cat("Dia +", i, ":", round(P_final[i]), "clientes\n")
+  }
+  
+  # Gráfico: últimas 4 semanas reais + previsão
+  ultimos <- tail(S, 28)
+  plot(1:28, ultimos, type="l", col="black",
+       xlim=c(1, 28+npred),
+       main=paste0(loja_nome, " — Últimas 4 semanas + Previsão"),
+       ylab="Num_Customers", xlab="Dias")
+  lines((28+1):(28+npred), P_final, type="b", col="blue", pch=19)
+  legend("topleft", c("Real","Previsão"), col=c("black","blue"), lty=1)
+  
+  return(P_final)
+}
+
+# Aplicar a cada loja
+prev_balt  <- previsao_final(baltimore_uni$Num_Customers,    "Baltimore")
+prev_lanc  <- previsao_final(lancaster_uni$Num_Customers,    "Lancaster")
+prev_phil  <- previsao_final(philadelphia_uni$Num_Customers, "Philadelphia")
+prev_rich  <- previsao_final(richmond_uni$Num_Customers,     "Richmond")
+```
+
+```{r}
+# ═══════════════════════════════════════════════════════════════════════════
+# FORECAST MULTIVARIADO
+# Variáveis endógenas: Num_Customers + Sales_Lag1
+# Método MLPE
+# ═══════════════════════════════════════════════════════════════════════════
+
+library(vars)
+library(forecast)
+library(rminer)
+
+# ── Funções do multi-utils.R embutidas ──────────────────────────────────────
+
+conv_ts <- function(x, frequency=1, labels=NULL) {
+  if (is.vector(x)) {
+    x <- ts(as.matrix(cbind(x)), frequency=frequency)
+    if (is.null(labels)) labels <- "x_1"
+  } else if (is.data.frame(x) || is.matrix(x)) {
+    if (is.null(labels) && !is.null(names(x))) labels <- names(x) else labels <- paste("x_", 1:ncol(x), sep="")
+    if (is.data.frame(x)) x <- as.matrix(x)
+    x <- ts(x, frequency=frequency)
+  }
+  attr(x, "dimnames")[[2]] <- labels
+  return(x)
+}
+
+autoVAR <- function(mtr, lag.max=10, type="const", season=NULL, exogen=NULL) {
+  if (!is.ts(mtr)) mtr <- conv_ts(mtr)
+  if (!is.null(exogen)) {
+    if (!is.ts(exogen)) exogen <- conv_ts(exogen)
+    mvar <- VAR(mtr, type=type, season=season, exogen=exogen, lag.max=lag.max, ic="SC")
+  } else {
+    mvar <- VAR(mtr, type=type, season=season, lag.max=lag.max, ic="SC")
+  }
+  return(mvar)
+}
+
+forecastVAR <- function(model, h=10, exogen=NULL) {
+  models <- length(model$varresult)
+  res    <- vector("list", length=models)
+  if (!is.null(exogen)) {
+    if (!is.ts(exogen)) exogen <- conv_ts(exogen)
+    # Atribuir ao ambiente global com nome fixo para o vars::predict o encontrar
+    assign("exogen_dumvar", exogen, envir=.GlobalEnv)
+    F1 <- predict(model, n.ahead=h, dumvar=get("exogen_dumvar", envir=.GlobalEnv))
+    rm("exogen_dumvar", envir=.GlobalEnv)
+  } else {
+    F1 <- predict(model, n.ahead=h)
+  }
+  for (i in 1:models) res[[i]] <- as.numeric(F1$fcst[[i]][,1])
+  return(res)
+}
+
+autoARIMAX <- function(mtr, frequency=1, exogen=NULL) {
+  if (!is.ts(mtr)) mtr <- conv_ts(mtr)
+  models <- ncol(mtr)
+  nr     <- nrow(mtr)
+  nmtr   <- attr(mtr, "dimnames")[[2]]
+  res    <- vector("list", length=models)
+  res2   <- vector("list", length=models)
+  if (!is.null(exogen)) {
+    if (!is.ts(exogen)) exogen <- conv_ts(exogen, frequency=frequency)
+  }
+  for (i in 1:models) {
+    if (frequency > 1) s_tr <- ts(mtr[1:nr,i], frequency=frequency) else s_tr <- ts(mtr[1:nr,i])
+    xreg <- ts(mtr[1:nr,-i], frequency=frequency)
+    if (!is.null(exogen)) xreg <- cbind(xreg, exogen)
+    attr(xreg, "dimnames")[[2]] <- c(nmtr[-i], attr(exogen, "dimnames")[[2]])
+    res[[i]]  <- auto.arima(s_tr, xreg=xreg)
+    res2[[i]] <- auto.arima(s_tr)
+  }
+  return(list(arimax=res, arima=res2, frequency2=frequency))
+}
+
+forecastARIMAX <- function(model, h=10, exogen=NULL) {
+  models <- length(model$arimax)
+  res    <- vector("list", length=models)
+  xreg   <- matrix(ncol=models, nrow=h)
+  for (i in 1:models) xreg[,i] <- forecast(model$arima[[i]], h=h)$mean
+  if (!is.null(exogen)) {
+    if (!is.ts(exogen)) exogen <- conv_ts(exogen, frequency=model$frequency2)
+  }
+  for (i in 1:models) {
+    if (length(xreg[1,-i]) == 1) { xaux <- matrix(ncol=1, nrow=h); xaux[,1] <- xreg[,-i] }
+    else xaux <- as.matrix(xreg[,-i])
+    narimax <- names(model$arimax[[i]]$coef)
+    xaux    <- ts(xaux, frequency=model$frequency2)
+    if (!is.null(exogen)) xaux <- as.matrix(cbind(xaux, exogen))
+    attr(xaux, "dimnames")[[2]] <- narimax[(length(narimax)-ncol(xaux)+1):length(narimax)]
+    F1      <- forecast(model$arimax[[i]], h=h, xreg=xaux)
+    res[[i]] <- as.numeric(F1$mean)
+  }
+  return(res)
+}
+
+vreverse <- function(x) x[length(x):1]
+
+mfit <- function(mtr, model, VINP, exogen=NULL) {
+  nmodels <- ncol(mtr)
+  lagmax  <- 1
+  for (i in 1:nmodels)
+    for (j in 1:nmodels)
+      lagmax <- max(lagmax, VINP[[i]][[j]])
+  mdata <- vector("list", length=nmodels)
+  for (i in 1:nmodels) mdata[[i]] <- CasesSeries(mtr[,i], 1:lagmax)
+  if (!is.null(exogen)) {
+    NR <- nrow(mtr)
+    if (is.vector(exogen)) {
+      if (NR == length(exogen)) exogen <- cbind(exogen[(lagmax+1):NR])
+      else exogen <- cbind(exogen)
+    } else if (NR == nrow(exogen)) exogen <- exogen[(lagmax+1):NR,]
+    exogen <- as.data.frame(exogen)
+  }
+  mdata2 <- vector("list", length=nmodels)
+  for (i in 1:nmodels) {
+    for (j in 1:nmodels) {
+      if (j == 1) {
+        mnames <- names(mdata[[j]])
+        inames <- paste("lag", VINP[[i]][[j]], sep="")
+        I <- NULL
+        for (k in inames) I <- c(I, which(mnames==k))
+        I  <- sort(I)
+        D  <- mdata[[j]][,I]
+        if (is.vector(D)) D <- data.frame(cbind(D))
+        NCD    <- ncol(D)
+        dnames <- vreverse(inames)
+        ini <- 1; end <- ini + length(dnames) - 1
+        names(D)[ini:end] <- paste("x", j, dnames, sep="")
+      } else {
+        NCD    <- ncol(D)
+        inames <- paste("lag", VINP[[i]][[j]], sep="")
+        dnames <- vreverse(inames)
+        D      <- cbind(D, mdata[[j]][,dnames])
+        ini    <- NCD + 1; end <- ini + length(dnames) - 1
+        names(D)[ini:end] <- paste("x", j, dnames, sep="")
+      }
+    }
+    if (!is.null(exogen)) D <- cbind(D, exogen, y=mdata[[i]]$y)
+    else D <- cbind(D, y=mdata[[i]]$y)
+    mdata2[[i]] <- D
+  }
+  mmodels <- vector("list", length=nmodels)
+  for (i in 1:nmodels) mmodels[[i]] <- fit(y~., mdata2[[i]], model=model)
+  return(list(mdata=mdata2, mmodels=mmodels, vinp=VINP))
+}
+
+lforecastm <- function(model, h=10, exogen=NULL) {
+  models <- length(model$mmodels)
+  res    <- vector("list", length=models)
+  for (j in 1:models) res[[j]] <- vector(length=h)
+  if (!is.null(exogen) && is.vector(exogen)) exogen <- cbind(exogen)
+  exogen <- as.data.frame(exogen)
+  if (!is.null(exogen)) nexo <- names(exogen)
+  VEX    <- vector("list", length=models)
+  vnames <- vector("list", length=models)
+  VI     <- vector("list", length=models)
+  for (i in 1:h) {
+    for (j in 1:models) {
+      start    <- nrow(model$mdata[[j]]) - h + 1
+      VEX[[j]] <- model$mdata[[j]][start+i-1,]
+      if (i > 1) {
+        for (k in 1:models) {
+          VI[[k]]     <- intersect(1:(i-1), model$vinp[[j]][[k]])
+          vnames[[k]] <- paste("x", k, "lag", VI[[k]], sep="")
+          vnames[[k]] <- vreverse(vnames[[k]])
+          VI[[k]]     <- as.numeric(VI[[k]])
+          VEX[[j]][,vnames[[k]]] <- res[[k]][(i-1) - vreverse(VI[[k]]) + 1]
+        }
+      }
+      if (!is.null(exogen)) { INP <- VEX[[j]]; INP[,nexo] <- exogen[i,] }
+      else INP <- VEX[[j]]
+      res[[j]][i] <- predict(model$mmodels[[j]], INP)
+    }
+  }
+  return(res)
+}
+```
+
+```{r}
+# ── Parâmetros ──────────────────────────────────────────────────────────────
+NPRED     <- 7
+W_SEMANAS <- 25
+K         <- 7   # sazonalidade semanal
+
+# VINP: lags para cada variável endógena
+# Var 1 (Num_Customers): lags 1,2,7 de Num_Customers + lags 1,7 de Sales
+# Var 2 (Sales):         lags 1,7 de Num_Customers   + lags 1,2,7 de Sales
+VINP        <- vector("list", length=2)
+VINP[[1]]   <- list(c(1,2,7), c(1,7))
+VINP[[2]]   <- list(c(1,7),   c(1,2,7))
+
+# ── Função auxiliar de gráfico e métricas para 2 variáveis ─────────────────
+fshow_multi <- function(Y, Pred1, Pred2, method, loja_nome) {
+  par(mfrow=c(1,2))
+  srange1 <- as.numeric(diff(quantile(Y[,1], probs=c(0.01,0.99))))
+  srange2 <- as.numeric(diff(quantile(Y[,2], probs=c(0.01,0.99))))
+  nmae1   <- round(mmetric(Y[,1], Pred1, metric="NMAE", val=srange1), 1)
+  nmae2   <- round(mmetric(Y[,2], Pred2, metric="NMAE", val=srange2), 1)
+  mgraph(Y[,1], Pred1, graph="REG", Grid=10,
+         main=paste0(loja_nome, " ", method, " Num_Customers (NMAE=", nmae1, "%)"),
+         col=c("black","blue"), leg=list(pos="topleft", leg=c("real",method)))
+  mgraph(Y[,2], Pred2, graph="REG", Grid=10,
+         main=paste0(loja_nome, " ", method, " Sales (NMAE=", nmae2, "%)"),
+         col=c("black","red"),  leg=list(pos="topleft", leg=c("real",method)))
+  par(mfrow=c(1,1))
+  cat(method, loja_nome,
+      "| Num_Customers NMAE:", nmae1, "%",
+      "| Sales NMAE:", nmae2, "%\n")
+}
+
+# ── Preparar matriz endógena a partir do dataframe multi ───────────────────
+prepare_endogenous <- function(df_multi) {
+  # Endógenas: Num_Customers e Sales_Lag1 (proxy de Sales sem data leakage)
+  mtr_end <- cbind(
+    Num_Customers = df_multi$Num_Customers,
+    Sales         = df_multi$Sales_Lag1
+  )
+  # Remover linhas com NA (primeiros registos por causa dos lags)
+  mtr_end <- mtr_end[complete.cases(mtr_end), ]
+  return(mtr_end)
+}
+
+# ── Preparar variáveis exógenas ─────────────────────────────────────────────
+prepare_exogenous <- function(df_multi, n_rows) {
+  exo_cols <- intersect(colnames(df_multi),
+                        c("TouristEvent_num","IsHoliday",
+                          "IsBlackFriday","IsChristmas","Pct_On_Sale"))
+  if (length(exo_cols) == 0) return(NULL)
+  exogen <- as.matrix(df_multi[1:n_rows, exo_cols])
+  return(exogen)
+}
+```
+
+
+```{r}
+# ═══════════════════════════════════════════════════════════════════════════
+# FASE I — Multivariado
+# ═══════════════════════════════════════════════════════════════════════════
+forecast_multi_phaseI <- function(df_multi, loja_nome, npred=NPRED) {
+  mtr_end <- prepare_endogenous(df_multi)
+  N       <- nrow(mtr_end)
+  exogen  <- prepare_exogenous(df_multi, N)
+  hd   <- holdout(mtr_end[,1], ratio=npred, mode="order")
+  Y    <- mtr_end[hd$ts,]
+  mtr_tr  <- ts(mtr_end[hd$tr,], frequency=K)
+  exotr   <- if (!is.null(exogen)) exogen[hd$tr,,drop=FALSE] else NULL
+  exots   <- if (!is.null(exogen)) exogen[hd$ts,,drop=FALSE] else NULL
+
+  cat("\n======", loja_nome, "(Multivariado Fase I) ======\n")
+  cat("N:", N, "| Treino:", length(hd$tr), "| Teste:", npred, "\n")
+
+  # ── VAR ──────────────────────────────────────────────────────────────────
+  cat(">> VAR\n")
+  mvar <- suppressWarnings(autoVAR(mtr_tr))
+  FV   <- forecastVAR(mvar, h=npred)
+  fshow_multi(Y, FV[[1]], FV[[2]], "VAR", loja_nome)
+
+  # ── ARIMAX com fallback para ARIMA puro se falhar ─────────────────────────
+  cat(">> ARIMAX\n")
+  arimax_result <- tryCatch({
+    arimax <- suppressWarnings(autoARIMAX(mtr_tr, frequency=K, exogen=exotr))
+    suppressWarnings(forecastARIMAX(arimax, h=npred, exogen=exots))
+  }, error = function(e) {
+    cat("  [ARIMAX falhou — usando ARIMA puro]\n")
+    res <- vector("list", length=2)
+    for (i in 1:2) {
+      s_tr    <- ts(mtr_tr[,i], frequency=K)
+      m       <- suppressWarnings(auto.arima(s_tr))
+      res[[i]] <- as.numeric(forecast(m, h=npred)$mean)
+    }
+    res
+  })
+  fshow_multi(Y, arimax_result[[1]], arimax_result[[2]], "ARIMAX", loja_nome)
+
+  # ── Multivariate MLPE ────────────────────────────────────────────────────
+  cat(">> Multivariate MLPE\n")
+  MNN  <- mfit(mtr_end[hd$tr,], "mlpe", VINP, exogen=exotr)
+  Pred <- lforecastm(MNN, h=npred, exogen=exots)
+  fshow_multi(Y, Pred[[1]], Pred[[2]], "MLPE", loja_nome)
+
+  return(list(Y=Y, VAR=FV, ARIMAX=arimax_result, MLPE=Pred))
+}
+
+res_multi_balt <- forecast_multi_phaseI(baltimore_multi,    "Baltimore")
+res_multi_lanc <- forecast_multi_phaseI(lancaster_multi,    "Lancaster")
+res_multi_phil <- forecast_multi_phaseI(philadelphia_multi, "Philadelphia")
+res_multi_rich <- forecast_multi_phaseI(richmond_multi,     "Richmond")
+```
+
+```{r}
+# ═══════════════════════════════════════════════════════════════════════════
+# FASE II — Backtesting Rolling Window Multivariado
+# ═══════════════════════════════════════════════════════════════════════════
+backtesting_multi <- function(df_multi, loja_nome,
+                              npred=NPRED, w_semanas=W_SEMANAS, step=7) {
+
+  mtr_end  <- prepare_endogenous(df_multi)
+  N        <- nrow(mtr_end)
+  exogen   <- prepare_exogenous(df_multi, N)
+  srange_c <- as.numeric(diff(quantile(mtr_end[,1], probs=c(0.01,0.99))))
+
+  W    <- w_semanas * 7
+  runs <- floor((N - npred - W) / step)
+
+  cat("Loja:", loja_nome, "| N:", N,
+      "| W:", W, "dias (", w_semanas, "sem.) | runs:", runs, "\n")
+
+  ev_var    <- numeric(runs)
+  ev_arimax <- numeric(runs)
+  ev_mlpe   <- numeric(runs)
+  ev_sn     <- numeric(runs)
+  all_Y <- c(); all_VAR <- c(); all_ARIMAX <- c(); all_MLPE <- c()
+
+  for (b in 1:runs) {
+
+  H2 <- holdout(mtr_end[,1], ratio=npred, mode="rolling",
+                iter=b, window=W, increment=step)
+
+  mtr_tr <- ts(mtr_end[H2$tr,], frequency=K)
+  Y_real <- mtr_end[H2$ts, 1]
+
+  exotr <- if (!is.null(exogen)) exogen[H2$tr,,drop=FALSE] else NULL
+  exots <- if (!is.null(exogen)) exogen[H2$ts,,drop=FALSE] else NULL
+
+  # VAR — sem exógenas
+  mvar  <- suppressWarnings(autoVAR(mtr_tr))
+  FV    <- forecastVAR(mvar, h=npred)
+  P_var <- FV[[1]]
+
+  # ARIMAX — com fallback para ARIMA puro se falhar
+  arimax_result <- tryCatch({
+    arimax <- suppressWarnings(autoARIMAX(mtr_tr, frequency=K, exogen=exotr))
+    suppressWarnings(forecastARIMAX(arimax, h=npred, exogen=exots))
+  }, error = function(e) {
+    cat("  [ARIMAX falhou na iter", b, "— usando ARIMA puro]\n")
+    res <- vector("list", length=2)
+    for (i in 1:2) {
+      s_tr <- ts(mtr_tr[,i], frequency=K)
+      m    <- suppressWarnings(auto.arima(s_tr))
+      res[[i]] <- as.numeric(forecast(m, h=npred)$mean)
+    }
+    res
+  })
+  P_arimax <- arimax_result[[1]]
+
+  # MLPE multivariado
+  MNN    <- mfit(mtr_end[H2$tr,], "mlpe", VINP, exogen=exotr)
+  Pred   <- lforecastm(MNN, h=npred, exogen=exots)
+  P_mlpe <- Pred[[1]]
+
+  # Seasonal Naive
+  P_sn <- mtr_end[(H2$ts[1] - npred):(H2$ts[1] - 1), 1]
+
+  ev_var[b]    <- mmetric(Y_real, P_var,    metric="NMAE", val=srange_c)
+  ev_arimax[b] <- mmetric(Y_real, P_arimax, metric="NMAE", val=srange_c)
+  ev_mlpe[b]   <- mmetric(Y_real, P_mlpe,   metric="NMAE", val=srange_c)
+  ev_sn[b]     <- mmetric(Y_real, P_sn,     metric="NMAE", val=srange_c)
+
+  cat("Iter:", b,
+      "| VAR:", round(ev_var[b],1),
+      " ARIMAX:", round(ev_arimax[b],1),
+      " MLPE:", round(ev_mlpe[b],1),
+      " SN:", round(ev_sn[b],1), "\n")
+
+  all_Y      <- c(all_Y,      Y_real)
+  all_VAR    <- c(all_VAR,    P_var)
+  all_ARIMAX <- c(all_ARIMAX, P_arimax)
+  all_MLPE   <- c(all_MLPE,   P_mlpe)
+}
+
+  cat("\n---", loja_nome, "(Multivariado) ---\n")
+  cat("VAR    mediana NMAE:", round(median(ev_var),    2), "%\n")
+  cat("ARIMAX mediana NMAE:", round(median(ev_arimax), 2), "%\n")
+  cat("MLPE   mediana NMAE:", round(median(ev_mlpe),   2), "%\n")
+  cat("SN     mediana NMAE:", round(median(ev_sn),     2), "%\n")
+
+  best_nmae <- min(median(ev_var), median(ev_arimax), median(ev_mlpe))
+  best_name <- c("VAR","ARIMAX","MLPE")[which.min(c(median(ev_var),
+                                                     median(ev_arimax),
+                                                     median(ev_mlpe)))]
+  cat("Melhor modelo:", best_name, "\n")
+  cat("Melhoria vs SN:",
+      round((median(ev_sn) - best_nmae) / median(ev_sn) * 100, 1), "%\n")
+
+  # Gráfico agregado
+  plot(all_Y, type="l", col="black",
+       main=paste0(loja_nome, " Multi — Rolling Window (", runs, " iterações)"),
+       ylab="Num_Customers", xlab="Observações de teste acumuladas")
+  lines(all_VAR,    col="blue",  lty=2)
+  lines(all_ARIMAX, col="green", lty=3)
+  lines(all_MLPE,   col="red",   lty=4)
+  legend("topright", c("Real","VAR","ARIMAX","MLPE"),
+         col=c("black","blue","green","red"), lty=c(1,2,3,4))
+
+  return(list(ev_var=ev_var, ev_arimax=ev_arimax,
+              ev_mlpe=ev_mlpe, ev_sn=ev_sn))
+}
+
+bt_multi_balt <- backtesting_multi(baltimore_multi,    "Baltimore")
+bt_multi_lanc <- backtesting_multi(lancaster_multi,    "Lancaster")
+bt_multi_phil <- backtesting_multi(philadelphia_multi, "Philadelphia")
+bt_multi_rich <- backtesting_multi(richmond_multi,     "Richmond")
+```
+
+```{r}
+# ── Gráfico de métricas por iteração ───────────────────────────────────────
+plot_metricas_multi <- function(bt_result, loja_nome) {
+  runs  <- length(bt_result$ev_var)
+  iters <- 1:runs
+  ylim  <- range(c(bt_result$ev_var, bt_result$ev_arimax,
+                   bt_result$ev_mlpe, bt_result$ev_sn))
+  plot(iters, bt_result$ev_var, type="b", col="blue",  pch=19, lty=1,
+       ylim=ylim,
+       main=paste0(loja_nome, " Multi — NMAE por iteração"),
+       xlab="Iteração", ylab="NMAE (%)")
+  lines(iters, bt_result$ev_arimax, type="b", col="green", pch=17, lty=2)
+  lines(iters, bt_result$ev_mlpe,   type="b", col="red",   pch=15, lty=3)
+  lines(iters, bt_result$ev_sn,     type="b", col="black", pch=18, lty=4)
+  abline(h=median(bt_result$ev_var),    col="blue",  lty=2, lwd=1.5)
+  abline(h=median(bt_result$ev_arimax), col="green", lty=2, lwd=1.5)
+  abline(h=median(bt_result$ev_mlpe),   col="red",   lty=2, lwd=1.5)
+  abline(h=median(bt_result$ev_sn),     col="black", lty=2, lwd=1.5)
+  legend("topright",
+         c(paste0("VAR (med=",    round(median(bt_result$ev_var),1),    "%)"),
+           paste0("ARIMAX (med=", round(median(bt_result$ev_arimax),1), "%)"),
+           paste0("MLPE (med=",   round(median(bt_result$ev_mlpe),1),   "%)"),
+           paste0("SN (med=",     round(median(bt_result$ev_sn),1),     "%)")),
+         col=c("blue","green","red","black"), lty=c(1,2,3,4), pch=c(19,17,15,18))
+}
+
+plot_metricas_multi(bt_multi_balt,  "Baltimore")
+plot_metricas_multi(bt_multi_lanc,  "Lancaster")
+plot_metricas_multi(bt_multi_phil,  "Philadelphia")
+plot_metricas_multi(bt_multi_rich,  "Richmond")
+```
+
+```{r}
+# ── Tabela resumo multivariado ──────────────────────────────────────────────
+resultados_multi <- data.frame(
+  Loja        = c("Baltimore","Lancaster","Philadelphia","Richmond"),
+  VAR_NMAE    = c(median(bt_multi_balt$ev_var),    median(bt_multi_lanc$ev_var),
+                  median(bt_multi_phil$ev_var),    median(bt_multi_rich$ev_var)),
+  ARIMAX_NMAE = c(median(bt_multi_balt$ev_arimax), median(bt_multi_lanc$ev_arimax),
+                  median(bt_multi_phil$ev_arimax), median(bt_multi_rich$ev_arimax)),
+  MLPE_NMAE   = c(median(bt_multi_balt$ev_mlpe),   median(bt_multi_lanc$ev_mlpe),
+                  median(bt_multi_phil$ev_mlpe),   median(bt_multi_rich$ev_mlpe)),
+  SN_NMAE     = c(median(bt_multi_balt$ev_sn),     median(bt_multi_lanc$ev_sn),
+                  median(bt_multi_phil$ev_sn),     median(bt_multi_rich$ev_sn))
+)
+
+resultados_multi$Melhor <- apply(resultados_multi[,2:4], 1,
+                                  function(x) c("VAR","ARIMAX","MLPE")[which.min(x)])
+resultados_multi$Melhoria_pct <- round(
+  (resultados_multi$SN_NMAE - apply(resultados_multi[,2:4], 1, min)) /
+   resultados_multi$SN_NMAE * 100, 1)
+
+print(resultados_multi)
+```
