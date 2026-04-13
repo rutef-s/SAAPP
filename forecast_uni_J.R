@@ -7,7 +7,7 @@
 library(forecast)
 library(rminer)
 
-STORE_FILE <- read.csv("data/baltimore.csv", sep = ",") # alterar para 1 dos outros 3 .csv
+STORE_FILE <- "baltimore.csv" # alterar para 1 dos outros 3 .csv
 DATE_COL   <- "Date"
 TARGET_COL <- "Num_Customers"
 
