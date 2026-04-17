@@ -688,7 +688,7 @@ uni_lags <- 28
 
 for (city in names(cities)) {
   df <- cities[[city]]
-  
+
   s_mat <- CasesSeries(df$Sales, c(1, 3, 7, 28))
   c_mat <- CasesSeries(df$Num_Customers, 1:uni_lags)
   colnames(c_mat) <- c(paste0("Num_Customers_Lag", 28:1), "Num_Customers")
@@ -702,7 +702,6 @@ for (city in names(cities)) {
 
   df$Num_Customers <- NULL
   df <- cbind(df, c_mat)
-  print(colnames(df))
 
   # Univariate
   df %>%
