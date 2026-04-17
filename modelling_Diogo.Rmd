@@ -1,0 +1,173 @@
+---
+title: "Modelling"
+output: html_document
+date: "2026-04-10"
+---
+
+```{r}
+# Libraries
+library(rminer)
+library(xgboost)
+library(ggplot2)
+```
+
+```{r}
+# Get Data
+baltimore_uni <- readRDS("data_clean/baltimore_uni.rds")
+baltimore_multi <- readRDS("data_clean/baltimore_multi.rds")
+
+lancaster_uni <- readRDS("data_clean/lancaster_uni.rds")
+lancaster_multi <- readRDS("data_clean/lancaster_multi.rds")
+
+philadelphia_uni <- readRDS("data_clean/philadelphia_uni.rds")
+philadelphia_multi <- readRDS("data_clean/philadelphia_multi.rds")
+
+richmond_uni <- readRDS("data_clean/richmond_uni.rds")
+richmond_multi <- readRDS("data_clean/richmond_multi.rds")
+```
+
+```{r}
+# Crate lists of dataframes for each type of problem (Multivariate and Univariate)
+datasets_uni <- list(baltimore_uni = baltimore_uni,
+                     lancaster_uni = lancaster_uni,
+                     philadelphia_uni = philadelphia_uni,
+                     richmond_uni = richmond_uni
+                     )
+datasets_multi <- list(baltimore_multi = baltimore_multi,
+                       lancaster_multi = lancaster_multi,
+                       philadelphia_multi = philadelphia_multi,
+                       richmond_multi = richmond_multi
+                       )
+```
+
+
+```{r}
+run.xgboost <- function(df, horizon = 7, iter = 20, city_name) {
+  cat("---- Start Training for XGBoost: ", city_name, "----\n")
+  N <- nrow(df)
+  window <- N - (iter * horizon) - horizon
+
+  params <- list(
+    objective = "reg:squarederror",
+    max_depth = 4,
+    eta = 0.1,
+    subsample = 0.8,
+    colsample_bytree = 0.8,
+    gamma = 0,
+    verbosity = 1
+  )
+
+  predictions <- list()
+
+  all_nmae <- matrix(NA, nrow = iter, ncol = horizon)
+  all_rmse <- matrix(NA, nrow = iter, ncol = horizon)
+
+  for (i in 1:iter) {
+    cat("\nIter:", i, "\n")
+    index <- holdout(
+      1:N,
+      ratio = horizon,
+      iter = i,
+      mode = "incremental",
+      increment = horizon,
+      window = window
+    )
+
+    train_idx <- index$tr
+
+    train <- df[train_idx, ]
+
+    X_train <- as.matrix(train[, !(names(train) %in% c("Date", "Num_Customers")), drop = FALSE])
+    y_train <- train$Num_Customers
+
+    d_train <- xgboost::xgb.DMatrix(data = X_train, label = y_train)
+
+    xgb_model <- xgboost::xgb.train(
+      params = params,
+      data = d_train,
+      nrounds = 100
+    )
+
+    for (h in 1:horizon) {
+      cat("\nHorizon:", h, "\n")
+      test_idx  <- index$ts[h]
+      test  <- df[test_idx, ]
+
+      x_test  <- as.matrix(test[, !(names(test) %in% c("Date", "Num_Customers")), drop = FALSE])
+      y_test  <- test$Num_Customers
+
+      d_test <- xgboost::xgb.DMatrix(data = x_test, label = y_test)
+      pred <- as.numeric(predict(xgb_model, d_test))
+
+      predictions[[length(predictions) + 1]] <- data.frame(
+        city = city_name,
+        iter = i,
+        horizon = h,
+        date = test$Date,
+        actual = y_test,
+        predicted = pred,
+        error = y_test - pred
+      )
+
+      mae  <- abs(y_test - pred)
+      nmae <- mae / mean(y_train)
+      rmse <- (y_test - pred)^2
+
+      all_nmae[i, h] <- nmae
+      all_rmse[i, h] <- rmse
+    }
+  }
+
+  predictions_df <- do.call(rbind, predictions)
+
+  nmae_per_horizon <- colMeans(all_nmae)
+  rmse_per_horizon <- sqrt(colMeans(all_rmse))
+
+  cat("\n---- XGBoost Completed:", city_name, "----\n")
+
+  return(list(
+    metrics = list(
+      NMAE = nmae_per_horizon,
+      RMSE = rmse_per_horizon
+    ),
+    predictions = predictions_df
+  ))
+}
+```
+
+
+```{r}
+# Start with the Univariate Problem
+out <- list()
+for (city_name in names(datasets_uni)) {
+  df <- datasets_uni[[city_name]]
+
+  out[[city_name]] <- run.xgboost(
+    df = df,
+    horizon = 7,
+    iter = 20,
+    city_name = city_name)
+}
+
+all_predictions <- do.call(rbind, lapply(out, function(x) x$predictions))
+```
+
+```{r}
+# Visualize Actual vs Predicted
+for (city in unique(all_predictions$city)) {
+  df_city <- subset(all_predictions, city == city)
+
+  p <- ggplot(df_city, aes(x = date)) +
+    geom_line(aes(y = actual), color = "black") +
+    geom_line(aes(y = predicted), color = "red") +
+    facet_wrap(~ horizon, scales = "free_y") +
+    ggtitle(paste("City:", city)) +
+    theme_minimal()
+
+  print(p)
+}
+```
+
+
+
+
