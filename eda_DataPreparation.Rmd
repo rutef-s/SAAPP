@@ -10,6 +10,9 @@ library(rminer)
 library(aTSA)
 library(dplyr)
 library(timeDate)
+library(lubridate)
+library(ggplot2)
+library(zoo)
 ```
 
 # Data
@@ -674,6 +677,83 @@ During the Exploratory Data Analysis (EDA) phase, an auxiliary feature—`Sales_
 **Resolution:** To maintain strict predictive integrity and structural continuity, purely analytical features like `Sales_per_Customer` are definitively dropped from the dataset *before* the lag generation process. Conversely, the contemporaneous `Sales` variable is removed strictly *after* its temporal lags are generated, as it is required for their calculation. This two-step removal process ensures the algorithm learns exclusively from valid historical data and fully prevents data leakage.
 
 ```{r}
+# Check if the Num_Customer is higher when its weekend
+baltimore$dow_label <- wday(baltimore$Date, label = TRUE, abbr = FALSE)
+
+lancaster$dow_label <- wday(lancaster$Date, label = TRUE, abbr = FALSE)
+
+philadelphia$dow_label <- wday(philadelphia$Date, label = TRUE, abbr = FALSE)
+
+richmond$dow_label <- wday(richmond$Date, label = TRUE, abbr = FALSE)
+```
+
+```{r}
+ggplot(baltimore, aes(x = dow_label, y = Num_Customers)) +
+  ggtitle("Baltimore") +
+  geom_boxplot() +
+  theme_minimal()
+
+ggplot(lancaster, aes(x = dow_label, y = Num_Customers)) +
+  ggtitle("Lancaster") +
+  geom_boxplot() +
+  theme_minimal()
+
+ggplot(philadelphia, aes(x = dow_label, y = Num_Customers)) +
+  ggtitle("Philadelphia") +
+  geom_boxplot() +
+  theme_minimal()
+
+ggplot(richmond, aes(x = dow_label, y = Num_Customers)) +
+  ggtitle("Richmond") +
+  geom_boxplot() +
+  theme_minimal()
+```
+
+To better understand the behavior of the time series, we analyzed the distribution of the number of customers across the days of the week.
+
+From the boxplots, it is clear that there is a strong weekly pattern in the data. In particular:
+- Customer counts tend to be significantly higher during weekends, especially on Saturdays.
+- Fridays already show an increasing trend compared to earlier weekdays.
+- Weekdays (Monday to Thursday) are more stable and generally present lower values.
+
+This indicates that the day of the week has a strong influence on the target variable and helps explain some of the peaks observed in the series.
+
+Therefore, instead of treating these peaks as random outliers, we interpret them as systematic patterns driven by weekly seasonality.
+
+```{r}
+onehotEncoding <- function(df, column_name) {
+  df[[column_name]] <- as.factor(df[[column_name]])
+  
+  dummies <- model.matrix(~ . -1, data = df[column_name])
+  colnames(dummies) <- gsub(paste0("^", column_name), "", colnames(dummies))
+  dummies <- as.data.frame(dummies)
+  
+  df[[column_name]] <- NULL
+  
+  df <- cbind(df, dummies)
+  
+  return(df)
+}
+```
+
+```{r}
+baltimore <- onehotEncoding(df = baltimore, column_name = "dow_label")
+lancaster <- onehotEncoding(df = lancaster, column_name = "dow_label")
+philadelphia <- onehotEncoding(df = philadelphia, column_name = "dow_label")
+richmond <- onehotEncoding(df = richmond, column_name = "dow_label")
+```
+
+Given the strong weekly patterns observed, we introduced the day of the week as an explanatory feature.
+
+To properly represent this variable, we applied One-Hot Encoding. This approach allows the model to learn a separate effect for each day (e.g., Monday, Tuesday, ..., Sunday), instead of assuming a numerical or ordinal relationship between them.
+
+This is particularly important because the relationship between days is not linear — for example, Saturday has a significantly different behavior compared to other days.
+
+After encoding, the original categorical variable was removed to avoid redundancy and potential bias in the model.
+
+This transformation allows the model to better capture weekly seasonality and improves its ability to explain peaks in customer demand.
+
+```{r}
 baltimore <- baltimore %>% select(-c("Sales_per_Customer"))
 lancaster <- lancaster %>% select(-c("Sales_per_Customer"))
 philadelphia <- philadelphia %>% select(-c("Sales_per_Customer"))
@@ -703,11 +783,22 @@ for (city in names(cities)) {
   df$Num_Customers <- NULL
   df <- cbind(df, c_mat)
 
-  # Univariate
+  df$rolling_mean_7 <- rollmean(
+    df$Num_Customers_Lag1,
+    k=7,
+    align = "right",
+    fill = NA
+  )
+
+  df <- na.omit(df)
+
+  # Save the columns to the respective dataset.
+  # Univariate Dataset
   df %>%
-    select(Date, starts_with("Num_Customers")) %>%
+    select(Date, starts_with("Num_Customers"), IsChristmas, IsHoliday, rolling_mean_7, ends_with("-feira")) %>%
     saveRDS(paste0("data_clean/", city, "_uni.rds"))
 
+  # Multivariate Dataset
   df %>%
     select(-c(starts_with("Num_Customers_Lag")[1:27])) %>%
     select(-c("Sales", "TouristEvent")) %>%
@@ -716,7 +807,7 @@ for (city in names(cities)) {
   cat("Completed successfully:", city, "\n")
 }
 ```
-x
+
 To transition the fully preprocessed datasets from the Exploratory Data Analysis (EDA) and Feature Engineering pipeline into the predictive modeling script, the data was exported using the native R Data Serialization format (`.rds`) rather than the standard `.csv` format.
 
 Unlike `.csv` files, which store information as plain text and strip away structural metadata, the `.rds` format preserves the exact in-memory state of the R objects. This is a critical practice in Time Series forecasting, as it ensures that strictly defined data types—such as chronological `Date` objects, logical booleans, and engineered numerical lags—retain their precise formatting. 
