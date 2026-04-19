@@ -27,99 +27,158 @@ richmond_multi <- readRDS("data_clean/richmond_multi.rds")
 ```{r}
 
 # ── Parâmetros globais ──────────────────────────────────────────────────────
-NPRED  <- 7          # horizonte: 1 semana
-LAGS   <- c(1, 2, 7) # lags definidos pela análise ACF/PACF
-# (podes testar também c(1,7) ou c(1:7) e comparar)
+NPRED <- 7
+LAGS  <- c(1, 2, 7)
+RUNS  <- 20    # número fixo de iterações
+STEP  <- 7     # cada iteração avança 1 semana
+K     <- 7     # sazonalidade semanal
 
-# ── Função auxiliar: forecast univariado para uma loja (Fase I) ─────────────
-forecast_univariate_phaseI <- function(serie, loja_nome, lags = LAGS, npred = NPRED) {
-  
+# ── Pesos para comparação de modelos (NMAE + RMSE) ─────────────────────────
+W_NMAE <- 0.5
+W_RMSE <- 0.5
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FUNÇÃO DE PÓS-PROCESSAMENTO
+# ═══════════════════════════════════════════════════════════════════════════
+postprocess_predictions <- function(predictions, dates_futuros=NULL) {
+
+  # 1. Arredondar para inteiro — não pode haver clientes decimais
+  predictions <- round(predictions)
+
+  # 2. Garantir não negativos
+  predictions <- pmax(predictions, 0L)
+
+  # 3. Aplicar regras de dias fechados se datas fornecidas
+  if (!is.null(dates_futuros)) {
+    datas_str <- format(as.Date(dates_futuros), "%m-%d")
+
+    # Dias onde a loja está sempre fechada (0 clientes)
+    dias_fechados <- c(
+      "12-25",  # Natal
+      "12-31",  # Véspera de Ano Novo
+      "01-01"   # Ano Novo
+    )
+
+    fechado_idx <- datas_str %in% dias_fechados
+    if (any(fechado_idx)) {
+      cat("  [Pós-processamento] Dias forçados a 0:",
+          format(as.Date(dates_futuros)[fechado_idx], "%Y-%m-%d"), "\n")
+      predictions[fechado_idx] <- 0L
+    }
+  }
+
+  return(as.integer(predictions))
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FUNÇÃO DE SCORING PONDERADO (NMAE + RMSE)
+# ═══════════════════════════════════════════════════════════════════════════
+weighted_score <- function(med_nmae, med_rmse,
+                           all_nmae, all_rmse,
+                           w_nmae=W_NMAE, w_rmse=W_RMSE) {
+  # Normaliza as medianas pelo range de todos os modelos
+  # Score mais baixo = modelo melhor
+  range_nmae <- diff(range(all_nmae))
+  range_rmse <- diff(range(all_rmse))
+
+  norm_nmae <- if (range_nmae > 0) (med_nmae - min(all_nmae)) / range_nmae else 0
+  norm_rmse <- if (range_rmse > 0) (med_rmse - min(all_rmse)) / range_rmse else 0
+
+  return(w_nmae * norm_nmae + w_rmse * norm_rmse)
+}
+```
+
+
+```{r}
+# ═══════════════════════════════════════════════════════════════════════════
+# FASE I — UNIVARIADO
+# ═══════════════════════════════════════════════════════════════════════════
+forecast_univariate_phaseI <- function(serie, loja_nome, lags=LAGS, npred=NPRED) {
+
   S      <- serie
   srange <- as.numeric(diff(quantile(S, probs=c(0.01, 0.99))))
-  
-  # Converter série em data.frame com lags (inputs) e y (target)
-  D  <- CasesSeries(S, lags)
-  N  <- nrow(D)
-  TR <- 1:(N - npred)     # treino: tudo exceto últimos 7 dias
-  TS <- (N - npred + 1):N # teste: última semana
-  
-  cat("\n======", loja_nome, "======\n")
-  cat("Total exemplos D:", N, "| Treino:", length(TR), "| Teste:", length(TS), "\n")
-  
-  # Treinar modelos
-  NN <- fit(y~., D[TR,], model = "mlpe",         search = "heuristic")
-  RF <- fit(y~., D[TR,], model = "randomForest",  search = "heuristic")
-  
-  # Previsões multi-step (lforecast propaga previsões anteriores como inputs)
-  START <- N - npred + 1
-  PNN   <- lforecast(NN, D, start = START, horizon = npred)
-  PRF   <- lforecast(RF, D, start = START, horizon = npred)
-  
-  # Baseline: Seasonal Naive (repete os últimos 7 valores conhecidos)
-  # Os últimos 7 valores conhecidos são os que precedem o período de teste na série original
-  PSN <- S[(length(S) - npred*2 + 1):(length(S) - npred)] # semana anterior
+  D      <- CasesSeries(S, lags)
+  N      <- nrow(D)
+  TR     <- 1:(N - npred)
+  TS     <- (N - npred + 1):N
 
-  
-  Y <- D[TS,]$y # valores reais
-  
-  # Métricas
+  cat("\n======", loja_nome, "(Univariado Fase I) ======\n")
+  cat("Total exemplos D:", N, "| Treino:", length(TR), "| Teste:", length(TS), "\n")
+
+  NN  <- fit(y~., D[TR,], model="mlpe",        search="heuristic")
+  RF  <- fit(y~., D[TR,], model="randomForest", search="heuristic")
+
+  START <- N - npred + 1
+  PNN   <- postprocess_predictions(lforecast(NN, D, start=START, horizon=npred))
+  PRF   <- postprocess_predictions(lforecast(RF, D, start=START, horizon=npred))
+  PSN   <- as.integer(round(S[(length(S) - npred*2 + 1):(length(S) - npred)]))
+
+  Y <- D[TS,]$y
+
   metrics_fn <- function(label, Pred) {
-    cat(label, "| MAE:", round(mmetric(Y, Pred, metric="MAE"), 2),
-        "| NMAE:", round(mmetric(Y, Pred, metric="NMAE", val=srange), 1), "%",
-        "| RMSE:", round(mmetric(Y, Pred, metric="RMSE"), 2),
-        "| R2:", round(mmetric(Y, Pred, metric="R22"), 3), "\n")
+    cat(label,
+        "| NMAE:", round(mmetric(Y, Pred, metric="NMAE", val=srange), 2), "%",
+        "| RMSE:", round(mmetric(Y, Pred, metric="RMSE"), 2), "\n")
   }
-  
-  metrics_fn("NN  ", PNN)
-  metrics_fn("RF  ", PRF)
-  metrics_fn("SN  ", PSN) # Seasonal Naive baseline
-  
-  # Melhoria vs Seasonal Naive (baseada em NMAE)
-  nmae_nn <- mmetric(Y, PNN, metric="NMAE", val=srange)
-  nmae_rf <- mmetric(Y, PRF, metric="NMAE", val=srange)
-  nmae_sn <- mmetric(Y, PSN, metric="NMAE", val=srange)
-  cat("Melhoria NN vs SN:", round((nmae_sn - nmae_nn) / nmae_sn * 100, 1), "%\n")
-  cat("Melhoria RF vs SN:", round((nmae_sn - nmae_rf) / nmae_sn * 100, 1), "%\n")
-  
-  # Gráfico predicted vs real
-  main_nn <- paste0(loja_nome, " NN (NMAE=", round(nmae_nn,1), "%, R²=", round(mmetric(Y,PNN,metric="R22"),2), ")")
-  mgraph(Y, PNN, graph="REG", main=main_nn, Grid=10,
-         col=c("black","blue"), lty=1,
+
+  metrics_fn("NN ", PNN)
+  metrics_fn("RF ", PRF)
+  metrics_fn("SN ", PSN)
+
+  # Scoring ponderado
+  modelos   <- c("NN","RF","SN")
+  nmae_vals <- c(mmetric(Y,PNN,metric="NMAE",val=srange),
+                 mmetric(Y,PRF,metric="NMAE",val=srange),
+                 mmetric(Y,PSN,metric="NMAE",val=srange))
+  rmse_vals <- c(mmetric(Y,PNN,metric="RMSE"),
+                 mmetric(Y,PRF,metric="RMSE"),
+                 mmetric(Y,PSN,metric="RMSE"))
+
+  scores <- mapply(weighted_score,
+                   nmae_vals, rmse_vals,
+                   MoreArgs=list(all_nmae=nmae_vals, all_rmse=rmse_vals))
+  names(scores) <- modelos
+  cat("Score ponderado (menor=melhor):", paste(modelos, round(scores,3), sep="=", collapse=" | "), "\n")
+  cat("Melhor modelo Fase I:", modelos[which.min(scores)], "\n")
+
+  mgraph(Y, PNN, graph="REG",
+         main=paste0(loja_nome, " NN (NMAE=",
+                     round(mmetric(Y,PNN,metric="NMAE",val=srange),1), "%)"),
+         Grid=10, col=c("black","blue"), lty=1,
          leg=list(pos="topright", leg=c("real","NN pred.")))
-  
+
   return(list(Y=Y, PNN=PNN, PRF=PRF, PSN=PSN, srange=srange))
 }
 
-# ── Aplicar a cada loja ─────────────────────────────────────────────────────
-res_balt  <- forecast_univariate_phaseI(baltimore_uni$Num_Customers,    "Baltimore")
-res_lanc  <- forecast_univariate_phaseI(lancaster_uni$Num_Customers,    "Lancaster")
-res_phil  <- forecast_univariate_phaseI(philadelphia_uni$Num_Customers, "Philadelphia")
-res_rich  <- forecast_univariate_phaseI(richmond_uni$Num_Customers,     "Richmond")
+res_balt <- forecast_univariate_phaseI(baltimore_uni$Num_Customers,    "Baltimore")
+res_lanc <- forecast_univariate_phaseI(lancaster_uni$Num_Customers,    "Lancaster")
+res_phil <- forecast_univariate_phaseI(philadelphia_uni$Num_Customers, "Philadelphia")
+res_rich <- forecast_univariate_phaseI(richmond_uni$Num_Customers,     "Richmond")
 ```
 
 
 ```{r}
 
-NPRED <- 7
-LAGS  <- c(1, 2, 7)
-W_SEMANAS <- 25  # ajusta entre 20 e 30 conforme preferires
-
+# ═══════════════════════════════════════════════════════════════════════════
+# FASE II — UNIVARIADO — Growing Window com RUNS fixo
+# ═══════════════════════════════════════════════════════════════════════════
 backtesting_univariate <- function(serie, loja_nome, lags=LAGS,
-                                   npred=NPRED, w_semanas=W_SEMANAS, step=7) {
+                                   npred=NPRED, runs=RUNS, step=STEP) {
   S      <- serie
   srange <- as.numeric(diff(quantile(S, probs=c(0.01, 0.99))))
   D      <- CasesSeries(S, lags)
   L      <- nrow(D)
 
-  W    <- w_semanas * 7
-  runs <- floor((L - npred - W) / step)
+  # W calculado a partir do número fixo de iterações
+  W <- L - npred - (runs - 1) * step
+  if (W < 30) stop("Janela de treino demasiado pequena. Reduz RUNS.")
 
   cat("Loja:", loja_nome, "| nrow(D):", L,
-      "| W:", W, "dias (", w_semanas, "semanas) | runs:", runs, "\n")
+      "| W:", W, "dias | runs:", runs, "\n")
 
-  ev_nn <- numeric(runs)
-  ev_rf <- numeric(runs)
-  ev_sn <- numeric(runs)
+  ev_nn_nmae <- numeric(runs); ev_nn_rmse <- numeric(runs)
+  ev_rf_nmae <- numeric(runs); ev_rf_rmse <- numeric(runs)
+  ev_sn_nmae <- numeric(runs); ev_sn_rmse <- numeric(runs)
   all_Y <- c(); all_PNN <- c(); all_PRF <- c()
 
   for (b in 1:runs) {
@@ -128,40 +187,58 @@ backtesting_univariate <- function(serie, loja_nome, lags=LAGS,
                     iter=b, window=W, increment=step)
     M_nn <- fit(y~., D[H2$tr,], model="mlpe",         search="heuristic")
     M_rf <- fit(y~., D[H2$tr,], model="randomForest",  search="heuristic")
-    P_nn <- lforecast(M_nn, D, start=(length(H2$tr)+1), horizon=npred)
-    P_rf <- lforecast(M_rf, D, start=(length(H2$tr)+1), horizon=npred)
 
-    # Seasonal Naive correto: 7 dias imediatamente antes do teste na série original
+    P_nn <- postprocess_predictions(lforecast(M_nn, D, start=(length(H2$tr)+1), horizon=npred))
+    P_rf <- postprocess_predictions(lforecast(M_rf, D, start=(length(H2$tr)+1), horizon=npred))
+
     inicio_teste_S <- H2$ts[1] + max(lags)
-    P_sn <- S[(inicio_teste_S - npred):(inicio_teste_S - 1)]
+    P_sn <- as.integer(round(S[(inicio_teste_S - npred):(inicio_teste_S - 1)]))
 
-    Y_real   <- D[H2$ts,]$y
-    ev_nn[b] <- mmetric(Y_real, P_nn, metric="NMAE", val=srange)
-    ev_rf[b] <- mmetric(Y_real, P_rf, metric="NMAE", val=srange)
-    ev_sn[b] <- mmetric(Y_real, P_sn, metric="NMAE", val=srange)
+    Y_real <- D[H2$ts,]$y
+
+    ev_nn_nmae[b] <- mmetric(Y_real, P_nn, metric="NMAE", val=srange)
+    ev_nn_rmse[b] <- mmetric(Y_real, P_nn, metric="RMSE")
+    ev_rf_nmae[b] <- mmetric(Y_real, P_rf, metric="NMAE", val=srange)
+    ev_rf_rmse[b] <- mmetric(Y_real, P_rf, metric="RMSE")
+    ev_sn_nmae[b] <- mmetric(Y_real, P_sn, metric="NMAE", val=srange)
+    ev_sn_rmse[b] <- mmetric(Y_real, P_sn, metric="RMSE")
 
     cat("Iter:", b,
-        "| TR:", H2$tr[1], "->", tail(H2$tr,1),
-        "| TS:", H2$ts[1], "->", tail(H2$ts,1),
-        "| NMAE NN:", round(ev_nn[b],1),
-        " RF:", round(ev_rf[b],1),
-        " SN:", round(ev_sn[b],1), "\n")
+        "| NN NMAE:", round(ev_nn_nmae[b],1), "RMSE:", round(ev_nn_rmse[b],1),
+        "| RF NMAE:", round(ev_rf_nmae[b],1), "RMSE:", round(ev_rf_rmse[b],1),
+        "| SN NMAE:", round(ev_sn_nmae[b],1), "RMSE:", round(ev_sn_rmse[b],1), "\n")
 
     all_Y   <- c(all_Y,   Y_real)
     all_PNN <- c(all_PNN, P_nn)
     all_PRF <- c(all_PRF, P_rf)
   }
 
+  # Medianas
+  med_nn_nmae <- median(ev_nn_nmae); med_nn_rmse <- median(ev_nn_rmse)
+  med_rf_nmae <- median(ev_rf_nmae); med_rf_rmse <- median(ev_rf_rmse)
+  med_sn_nmae <- median(ev_sn_nmae); med_sn_rmse <- median(ev_sn_rmse)
+
   cat("\n---", loja_nome, "---\n")
-  cat("NN  mediana NMAE:", round(median(ev_nn), 2), "%\n")
-  cat("RF  mediana NMAE:", round(median(ev_rf), 2), "%\n")
-  cat("SN  mediana NMAE:", round(median(ev_sn), 2), "%\n")
+  cat("NN  | mediana NMAE:", round(med_nn_nmae,2), "% | mediana RMSE:", round(med_nn_rmse,2), "\n")
+  cat("RF  | mediana NMAE:", round(med_rf_nmae,2), "% | mediana RMSE:", round(med_rf_rmse,2), "\n")
+  cat("SN  | mediana NMAE:", round(med_sn_nmae,2), "% | mediana RMSE:", round(med_sn_rmse,2), "\n")
 
-  best_nmae <- min(median(ev_nn), median(ev_rf))
-  cat("Melhor modelo:", ifelse(median(ev_nn) <= median(ev_rf), "NN", "RF"), "\n")
-  cat("Melhoria vs Seasonal Naive:",
-      round((median(ev_sn) - best_nmae) / median(ev_sn) * 100, 1), "%\n")
+  # Scoring ponderado
+  all_nmae <- c(med_nn_nmae, med_rf_nmae, med_sn_nmae)
+  all_rmse <- c(med_nn_rmse, med_rf_rmse, med_sn_rmse)
+  scores   <- c(
+    NN = weighted_score(med_nn_nmae, med_nn_rmse, all_nmae, all_rmse),
+    RF = weighted_score(med_rf_nmae, med_rf_rmse, all_nmae, all_rmse),
+    SN = weighted_score(med_sn_nmae, med_sn_rmse, all_nmae, all_rmse)
+  )
+  melhor <- names(which.min(scores))
+  cat("Score ponderado (menor=melhor):",
+      paste(names(scores), round(scores,3), sep="=", collapse=" | "), "\n")
+  cat("Melhor modelo:", melhor, "\n")
+  cat("Melhoria vs SN:",
+      round((med_sn_nmae - min(med_nn_nmae, med_rf_nmae)) / med_sn_nmae * 100, 1), "%\n")
 
+  # Gráfico agregado
   plot(all_Y, type="l", col="black",
        main=paste0(loja_nome, " — Growing Window (", runs, " iterações)"),
        ylab="Num_Customers", xlab="Observações de teste acumuladas")
@@ -170,58 +247,89 @@ backtesting_univariate <- function(serie, loja_nome, lags=LAGS,
   legend("topright", c("Real","NN","RF"),
          col=c("black","blue","red"), lty=c(1,2,3))
 
-  return(list(ev_nn=ev_nn, ev_rf=ev_rf, ev_sn=ev_sn))
+  return(list(
+    ev_nn_nmae=ev_nn_nmae, ev_nn_rmse=ev_nn_rmse,
+    ev_rf_nmae=ev_rf_nmae, ev_rf_rmse=ev_rf_rmse,
+    ev_sn_nmae=ev_sn_nmae, ev_sn_rmse=ev_sn_rmse,
+    scores=scores, melhor=melhor
+  ))
 }
+
 ```
 
 ```{r}
-bt_balt  <- backtesting_univariate(baltimore_uni$Num_Customers,    "Baltimore")
-bt_lanc  <- backtesting_univariate(lancaster_uni$Num_Customers,    "Lancaster")
-bt_phil  <- backtesting_univariate(philadelphia_uni$Num_Customers, "Philadelphia")
-bt_rich  <- backtesting_univariate(richmond_uni$Num_Customers,     "Richmond")
+bt_balt <- backtesting_univariate(baltimore_uni$Num_Customers,    "Baltimore")
+bt_lanc <- backtesting_univariate(lancaster_uni$Num_Customers,    "Lancaster")
+bt_phil <- backtesting_univariate(philadelphia_uni$Num_Customers, "Philadelphia")
+bt_rich <- backtesting_univariate(richmond_uni$Num_Customers,     "Richmond")
 ```
 
 ```{r}
-# Tabela resumo para o relatório
+# ── Tabela resumo univariado ────────────────────────────────────────────────
 resultados <- data.frame(
-  Loja      = c("Baltimore","Lancaster","Philadelphia","Richmond"),
-  NN_NMAE   = c(median(bt_balt$ev_nn), median(bt_lanc$ev_nn),
-                median(bt_phil$ev_nn), median(bt_rich$ev_nn)),
-  RF_NMAE   = c(median(bt_balt$ev_rf), median(bt_lanc$ev_rf),
-                median(bt_phil$ev_rf), median(bt_rich$ev_rf)),
-  SN_NMAE   = c(median(bt_balt$ev_sn), median(bt_lanc$ev_sn),
-                median(bt_phil$ev_sn), median(bt_rich$ev_sn))
+  Loja        = c("Baltimore","Lancaster","Philadelphia","Richmond"),
+  NN_NMAE     = c(median(bt_balt$ev_nn_nmae), median(bt_lanc$ev_nn_nmae),
+                  median(bt_phil$ev_nn_nmae), median(bt_rich$ev_nn_nmae)),
+  NN_RMSE     = c(median(bt_balt$ev_nn_rmse), median(bt_lanc$ev_nn_rmse),
+                  median(bt_phil$ev_nn_rmse), median(bt_rich$ev_nn_rmse)),
+  RF_NMAE     = c(median(bt_balt$ev_rf_nmae), median(bt_lanc$ev_rf_nmae),
+                  median(bt_phil$ev_rf_nmae), median(bt_rich$ev_rf_nmae)),
+  RF_RMSE     = c(median(bt_balt$ev_rf_rmse), median(bt_lanc$ev_rf_rmse),
+                  median(bt_phil$ev_rf_rmse), median(bt_rich$ev_rf_rmse)),
+  SN_NMAE     = c(median(bt_balt$ev_sn_nmae), median(bt_lanc$ev_sn_nmae),
+                  median(bt_phil$ev_sn_nmae), median(bt_rich$ev_sn_nmae)),
+  SN_RMSE     = c(median(bt_balt$ev_sn_rmse), median(bt_lanc$ev_sn_rmse),
+                  median(bt_phil$ev_sn_rmse), median(bt_rich$ev_sn_rmse)),
+  Melhor      = c(bt_balt$melhor, bt_lanc$melhor, bt_phil$melhor, bt_rich$melhor)
 )
-
-resultados$Melhor  <- ifelse(resultados$NN_NMAE <= resultados$RF_NMAE, "NN", "RF")
 resultados$Melhoria_pct <- round(
   (resultados$SN_NMAE - pmin(resultados$NN_NMAE, resultados$RF_NMAE)) /
    resultados$SN_NMAE * 100, 1)
-
 print(resultados)
 ```
 
 
 ```{r}
+# ── Gráfico NMAE + RMSE por iteração ───────────────────────────────────────
 plot_metricas <- function(bt_result, loja_nome) {
-  runs  <- length(bt_result$ev_nn)
+  runs  <- length(bt_result$ev_nn_nmae)
   iters <- 1:runs
-  ylim_nmae <- range(c(bt_result$ev_nn, bt_result$ev_rf, bt_result$ev_sn))
-  
-  plot(iters, bt_result$ev_nn, type="b", col="blue", pch=19, lty=1,
-       ylim=ylim_nmae,
-       main=paste0(loja_nome, " — NMAE por iteração"),
+
+  par(mfrow=c(1,2))
+
+  # NMAE
+  ylim_nmae <- range(c(bt_result$ev_nn_nmae, bt_result$ev_rf_nmae, bt_result$ev_sn_nmae))
+  plot(iters, bt_result$ev_nn_nmae, type="b", col="blue", pch=19, lty=1,
+       ylim=ylim_nmae, main=paste0(loja_nome, " — NMAE por iteração"),
        xlab="Iteração", ylab="NMAE (%)")
-  lines(iters, bt_result$ev_rf, type="b", col="red",   pch=17, lty=2)
-  lines(iters, bt_result$ev_sn, type="b", col="black", pch=15, lty=3)
-  abline(h=median(bt_result$ev_nn), col="blue",  lty=2, lwd=1.5)
-  abline(h=median(bt_result$ev_rf), col="red",   lty=2, lwd=1.5)
-  abline(h=median(bt_result$ev_sn), col="black", lty=2, lwd=1.5)
+  lines(iters, bt_result$ev_rf_nmae, type="b", col="red",   pch=17, lty=2)
+  lines(iters, bt_result$ev_sn_nmae, type="b", col="black", pch=15, lty=3)
+  abline(h=median(bt_result$ev_nn_nmae), col="blue",  lty=2, lwd=1.5)
+  abline(h=median(bt_result$ev_rf_nmae), col="red",   lty=2, lwd=1.5)
+  abline(h=median(bt_result$ev_sn_nmae), col="black", lty=2, lwd=1.5)
   legend("topright",
-         c(paste0("NN (med=",  round(median(bt_result$ev_nn),1), "%)"),
-           paste0("RF (med=",  round(median(bt_result$ev_rf),1), "%)"),
-           paste0("SN (med=",  round(median(bt_result$ev_sn),1), "%)")),
+         c(paste0("NN (med=",  round(median(bt_result$ev_nn_nmae),1), "%)"),
+           paste0("RF (med=",  round(median(bt_result$ev_rf_nmae),1), "%)"),
+           paste0("SN (med=",  round(median(bt_result$ev_sn_nmae),1), "%)")),
          col=c("blue","red","black"), lty=c(1,2,3), pch=c(19,17,15))
+
+  # RMSE
+  ylim_rmse <- range(c(bt_result$ev_nn_rmse, bt_result$ev_rf_rmse, bt_result$ev_sn_rmse))
+  plot(iters, bt_result$ev_nn_rmse, type="b", col="blue", pch=19, lty=1,
+       ylim=ylim_rmse, main=paste0(loja_nome, " — RMSE por iteração"),
+       xlab="Iteração", ylab="RMSE")
+  lines(iters, bt_result$ev_rf_rmse, type="b", col="red",   pch=17, lty=2)
+  lines(iters, bt_result$ev_sn_rmse, type="b", col="black", pch=15, lty=3)
+  abline(h=median(bt_result$ev_nn_rmse), col="blue",  lty=2, lwd=1.5)
+  abline(h=median(bt_result$ev_rf_rmse), col="red",   lty=2, lwd=1.5)
+  abline(h=median(bt_result$ev_sn_rmse), col="black", lty=2, lwd=1.5)
+  legend("topright",
+         c(paste0("NN (med=",  round(median(bt_result$ev_nn_rmse),1), ")"),
+           paste0("RF (med=",  round(median(bt_result$ev_rf_rmse),1), ")"),
+           paste0("SN (med=",  round(median(bt_result$ev_sn_rmse),1), ")")),
+         col=c("blue","red","black"), lty=c(1,2,3), pch=c(19,17,15))
+
+  par(mfrow=c(1,1))
 }
 
 plot_metricas(bt_balt,  "Baltimore")
@@ -232,26 +340,25 @@ plot_metricas(bt_rich,  "Richmond")
 
 
 ```{r}
-# ── Previsão final dos próximos 7 dias ──────────────────────────────────────
-previsao_final <- function(serie, loja_nome, lags=LAGS, npred=NPRED) {
-  
+# ── Previsão final univariada (com pós-processamento) ──────────────────────
+previsao_final <- function(serie, loja_nome, lags=LAGS, npred=NPRED,
+                           datas_futuras=NULL, melhor_modelo="NN") {
   S <- serie
   D <- CasesSeries(S, lags)
-  
-  # Treinar com TODOS os dados disponíveis
-  modelo_final <- fit(y~., D, model="randomForest", search="heuristic")
-  # (substitui randomForest pelo melhor modelo identificado na Fase II)
-  
-  # Prever os próximos 7 dias (1-ahead a 7-ahead)
-  START  <- nrow(D) + 1
-  P_final <- lforecast(modelo_final, D, start=START, horizon=npred)
-  
+
+  modelo_final <- fit(y~., D, model=ifelse(melhor_modelo=="RF","randomForest","mlpe"),
+                      search="heuristic")
+
+  START   <- nrow(D) + 1
+  P_raw   <- lforecast(modelo_final, D, start=START, horizon=npred)
+  P_final <- postprocess_predictions(P_raw, datas_futuras)
+
   cat("\n===", loja_nome, "— Previsão próximos 7 dias ===\n")
   for (i in 1:npred) {
-    cat("Dia +", i, ":", round(P_final[i]), "clientes\n")
+    data_str <- if (!is.null(datas_futuras)) paste0(" (", format(as.Date(datas_futuras)[i], "%Y-%m-%d"), ")") else ""
+    cat("Dia +", i, data_str, ":", P_final[i], "clientes\n")
   }
-  
-  # Gráfico: últimas 4 semanas reais + previsão
+
   ultimos <- tail(S, 28)
   plot(1:28, ultimos, type="l", col="black",
        xlim=c(1, 28+npred),
@@ -259,15 +366,24 @@ previsao_final <- function(serie, loja_nome, lags=LAGS, npred=NPRED) {
        ylab="Num_Customers", xlab="Dias")
   lines((28+1):(28+npred), P_final, type="b", col="blue", pch=19)
   legend("topleft", c("Real","Previsão"), col=c("black","blue"), lty=1)
-  
+
   return(P_final)
 }
 
-# Aplicar a cada loja
-prev_balt  <- previsao_final(baltimore_uni$Num_Customers,    "Baltimore")
-prev_lanc  <- previsao_final(lancaster_uni$Num_Customers,    "Lancaster")
-prev_phil  <- previsao_final(philadelphia_uni$Num_Customers, "Philadelphia")
-prev_rich  <- previsao_final(richmond_uni$Num_Customers,     "Richmond")
+datas_futuras <- seq(as.Date("2014-06-15"), by="day", length.out=7)
+
+prev_balt <- previsao_final(baltimore_uni$Num_Customers, "Baltimore",
+                             datas_futuras=datas_futuras,
+                             melhor_modelo=bt_balt$melhor)
+prev_lanc <- previsao_final(lancaster_uni$Num_Customers, "Lancaster",
+                             datas_futuras=datas_futuras,
+                             melhor_modelo=bt_lanc$melhor)
+prev_phil <- previsao_final(philadelphia_uni$Num_Customers, "Philadelphia",
+                             datas_futuras=datas_futuras,
+                             melhor_modelo=bt_phil$melhor)
+prev_rich <- previsao_final(richmond_uni$Num_Customers, "Richmond",
+                             datas_futuras=datas_futuras,
+                             melhor_modelo=bt_rich$melhor)
 ```
 
 ```{r}
@@ -437,7 +553,7 @@ prepare_exogenous <- function(df_multi, n_rows) {
 
 ```{r}
 # ═══════════════════════════════════════════════════════════════════════════
-# FASE I — Multivariado (apenas MLPE)
+# FASE I — MULTIVARIADO
 # ═══════════════════════════════════════════════════════════════════════════
 forecast_multi_phaseI <- function(df_multi, loja_nome, npred=NPRED) {
   mtr_end <- prepare_endogenous(df_multi)
@@ -445,19 +561,19 @@ forecast_multi_phaseI <- function(df_multi, loja_nome, npred=NPRED) {
   exogen  <- prepare_exogenous(df_multi, N)
   hd      <- holdout(mtr_end[,1], ratio=npred, mode="order")
   Y       <- mtr_end[hd$ts,]
-  mtr_tr  <- ts(mtr_end[hd$tr,], frequency=K)
   exotr   <- if (!is.null(exogen)) exogen[hd$tr,,drop=FALSE] else NULL
   exots   <- if (!is.null(exogen)) exogen[hd$ts,,drop=FALSE] else NULL
 
   cat("\n======", loja_nome, "(Multivariado Fase I) ======\n")
   cat("N:", N, "| Treino:", length(hd$tr), "| Teste:", npred, "\n")
 
-  # ── Multivariate MLPE ────────────────────────────────────────────────────
-  cat(">> Multivariate MLPE\n")
   MNN  <- mfit(mtr_end[hd$tr,], "mlpe", VINP, exogen=exotr)
   Pred <- lforecastm(MNN, h=npred, exogen=exots)
-  fshow_multi(Y, Pred[[1]], Pred[[2]], "MLPE", loja_nome)
 
+  # Pós-processamento apenas em Num_Customers
+  Pred[[1]] <- postprocess_predictions(Pred[[1]])
+
+  fshow_multi(Y, Pred[[1]], Pred[[2]], "MLPE", loja_nome)
   return(list(Y=Y, MLPE=Pred))
 }
 
@@ -466,27 +582,30 @@ res_multi_lanc <- forecast_multi_phaseI(lancaster_multi,    "Lancaster")
 res_multi_phil <- forecast_multi_phaseI(philadelphia_multi, "Philadelphia")
 res_multi_rich <- forecast_multi_phaseI(richmond_multi,     "Richmond")
 
+```
 
+```{r}
 # ═══════════════════════════════════════════════════════════════════════════
-# FASE II — Backtesting Growing Window Multivariado (apenas MLPE)
+# FASE II — MULTIVARIADO — Growing Window com RUNS fixo
 # ═══════════════════════════════════════════════════════════════════════════
 backtesting_multi <- function(df_multi, loja_nome,
-                              npred=NPRED, w_semanas=W_SEMANAS, step=7) {
+                              npred=NPRED, runs=RUNS, step=STEP) {
 
   mtr_end  <- prepare_endogenous(df_multi)
   N        <- nrow(mtr_end)
   exogen   <- prepare_exogenous(df_multi, N)
   srange_c <- as.numeric(diff(quantile(mtr_end[,1], probs=c(0.01,0.99))))
 
-  W    <- w_semanas * 7
-  runs <- floor((N - npred - W) / step)
+  # W calculado a partir do número fixo de iterações
+  W <- N - npred - (runs - 1) * step
+  if (W < 30) stop("Janela de treino demasiado pequena. Reduz RUNS.")
 
   cat("Loja:", loja_nome, "| N:", N,
-      "| W:", W, "dias (", w_semanas, "sem.) | runs:", runs, "\n")
+      "| W:", W, "dias | runs:", runs, "\n")
 
-  ev_mlpe <- numeric(runs)
-  ev_sn   <- numeric(runs)
-  all_Y   <- c(); all_MLPE <- c()
+  ev_mlpe_nmae <- numeric(runs); ev_mlpe_rmse <- numeric(runs)
+  ev_sn_nmae   <- numeric(runs); ev_sn_rmse   <- numeric(runs)
+  all_Y <- c(); all_MLPE <- c()
 
   for (b in 1:runs) {
 
@@ -497,85 +616,122 @@ backtesting_multi <- function(df_multi, loja_nome,
     exotr  <- if (!is.null(exogen)) exogen[H2$tr,,drop=FALSE] else NULL
     exots  <- if (!is.null(exogen)) exogen[H2$ts,,drop=FALSE] else NULL
 
-    # MLPE multivariado
     MNN    <- mfit(mtr_end[H2$tr,], "mlpe", VINP, exogen=exotr)
     Pred   <- lforecastm(MNN, h=npred, exogen=exots)
-    P_mlpe <- Pred[[1]]
+    P_mlpe <- postprocess_predictions(Pred[[1]])
 
-    # Seasonal Naive
-    P_sn <- mtr_end[(H2$ts[1] - npred):(H2$ts[1] - 1), 1]
+    P_sn <- as.integer(round(mtr_end[(H2$ts[1] - npred):(H2$ts[1] - 1), 1]))
 
-    ev_mlpe[b] <- mmetric(Y_real, P_mlpe, metric="NMAE", val=srange_c)
-    ev_sn[b]   <- mmetric(Y_real, P_sn,   metric="NMAE", val=srange_c)
+    ev_mlpe_nmae[b] <- mmetric(Y_real, P_mlpe, metric="NMAE", val=srange_c)
+    ev_mlpe_rmse[b] <- mmetric(Y_real, P_mlpe, metric="RMSE")
+    ev_sn_nmae[b]   <- mmetric(Y_real, P_sn,   metric="NMAE", val=srange_c)
+    ev_sn_rmse[b]   <- mmetric(Y_real, P_sn,   metric="RMSE")
 
     cat("Iter:", b,
-        "| TS:", H2$ts[1], "->", tail(H2$ts,1),
-        "| MLPE:", round(ev_mlpe[b],1),
-        " SN:", round(ev_sn[b],1), "\n")
+        "| MLPE NMAE:", round(ev_mlpe_nmae[b],1), "RMSE:", round(ev_mlpe_rmse[b],1),
+        "| SN NMAE:",   round(ev_sn_nmae[b],1),   "RMSE:", round(ev_sn_rmse[b],1), "\n")
 
     all_Y    <- c(all_Y,    Y_real)
     all_MLPE <- c(all_MLPE, P_mlpe)
   }
 
+  med_mlpe_nmae <- median(ev_mlpe_nmae); med_mlpe_rmse <- median(ev_mlpe_rmse)
+  med_sn_nmae   <- median(ev_sn_nmae);   med_sn_rmse   <- median(ev_sn_rmse)
+
   cat("\n---", loja_nome, "(Multivariado) ---\n")
-  cat("MLPE mediana NMAE:", round(median(ev_mlpe), 2), "%\n")
-  cat("SN   mediana NMAE:", round(median(ev_sn),   2), "%\n")
-  cat("Melhor modelo:", ifelse(median(ev_mlpe) <= median(ev_sn), "MLPE", "SN"), "\n")
+  cat("MLPE | mediana NMAE:", round(med_mlpe_nmae,2), "% | mediana RMSE:", round(med_mlpe_rmse,2), "\n")
+  cat("SN   | mediana NMAE:", round(med_sn_nmae,2),   "% | mediana RMSE:", round(med_sn_rmse,2),   "\n")
+
+  all_nmae <- c(med_mlpe_nmae, med_sn_nmae)
+  all_rmse <- c(med_mlpe_rmse, med_sn_rmse)
+  scores   <- c(
+    MLPE = weighted_score(med_mlpe_nmae, med_mlpe_rmse, all_nmae, all_rmse),
+    SN   = weighted_score(med_sn_nmae,   med_sn_rmse,   all_nmae, all_rmse)
+  )
+  melhor <- names(which.min(scores))
+  cat("Score ponderado:", paste(names(scores), round(scores,3), sep="=", collapse=" | "), "\n")
+  cat("Melhor modelo:", melhor, "\n")
   cat("Melhoria vs SN:",
-      round((median(ev_sn) - median(ev_mlpe)) / median(ev_sn) * 100, 1), "%\n")
+      round((med_sn_nmae - med_mlpe_nmae) / med_sn_nmae * 100, 1), "%\n")
 
   plot(all_Y, type="l", col="black",
        main=paste0(loja_nome, " Multi MLPE — Growing Window (", runs, " iterações)"),
        ylab="Num_Customers", xlab="Observações de teste acumuladas")
   lines(all_MLPE, col="red", lty=2)
-  legend("topright", c("Real","MLPE"),
-         col=c("black","red"), lty=c(1,2))
+  legend("topright", c("Real","MLPE"), col=c("black","red"), lty=c(1,2))
 
-  return(list(ev_mlpe=ev_mlpe, ev_sn=ev_sn))
+  return(list(
+    ev_mlpe_nmae=ev_mlpe_nmae, ev_mlpe_rmse=ev_mlpe_rmse,
+    ev_sn_nmae=ev_sn_nmae,     ev_sn_rmse=ev_sn_rmse,
+    scores=scores, melhor=melhor
+  ))
 }
 
 bt_multi_balt <- backtesting_multi(baltimore_multi,    "Baltimore")
 bt_multi_lanc <- backtesting_multi(lancaster_multi,    "Lancaster")
 bt_multi_phil <- backtesting_multi(philadelphia_multi, "Philadelphia")
 bt_multi_rich <- backtesting_multi(richmond_multi,     "Richmond")
+```
 
 
-# ── Gráfico de métricas por iteração ───────────────────────────────────────
+```{r}
+# ── Gráfico NMAE + RMSE por iteração — Multivariado ────────────────────────
 plot_metricas_multi <- function(bt_result, loja_nome) {
-  runs  <- length(bt_result$ev_mlpe)
+  runs  <- length(bt_result$ev_mlpe_nmae)
   iters <- 1:runs
-  ylim  <- range(c(bt_result$ev_mlpe, bt_result$ev_sn))
 
-  plot(iters, bt_result$ev_mlpe, type="b", col="red", pch=19, lty=1,
-       ylim=ylim,
-       main=paste0(loja_nome, " Multi — NMAE por iteração"),
+  par(mfrow=c(1,2))
+
+  # NMAE
+  ylim_nmae <- range(c(bt_result$ev_mlpe_nmae, bt_result$ev_sn_nmae))
+  plot(iters, bt_result$ev_mlpe_nmae, type="b", col="red", pch=19, lty=1,
+       ylim=ylim_nmae, main=paste0(loja_nome, " Multi — NMAE por iteração"),
        xlab="Iteração", ylab="NMAE (%)")
-  lines(iters, bt_result$ev_sn, type="b", col="black", pch=15, lty=2)
-  abline(h=median(bt_result$ev_mlpe), col="red",   lty=2, lwd=1.5)
-  abline(h=median(bt_result$ev_sn),   col="black", lty=2, lwd=1.5)
+  lines(iters, bt_result$ev_sn_nmae, type="b", col="black", pch=15, lty=2)
+  abline(h=median(bt_result$ev_mlpe_nmae), col="red",   lty=2, lwd=1.5)
+  abline(h=median(bt_result$ev_sn_nmae),   col="black", lty=2, lwd=1.5)
   legend("topright",
-         c(paste0("MLPE (med=", round(median(bt_result$ev_mlpe),1), "%)"),
-           paste0("SN (med=",   round(median(bt_result$ev_sn),1),   "%)")),
+         c(paste0("MLPE (med=", round(median(bt_result$ev_mlpe_nmae),1), "%)"),
+           paste0("SN (med=",   round(median(bt_result$ev_sn_nmae),1),   "%)")),
          col=c("red","black"), lty=c(1,2), pch=c(19,15))
+
+  # RMSE
+  ylim_rmse <- range(c(bt_result$ev_mlpe_rmse, bt_result$ev_sn_rmse))
+  plot(iters, bt_result$ev_mlpe_rmse, type="b", col="red", pch=19, lty=1,
+       ylim=ylim_rmse, main=paste0(loja_nome, " Multi — RMSE por iteração"),
+       xlab="Iteração", ylab="RMSE")
+  lines(iters, bt_result$ev_sn_rmse, type="b", col="black", pch=15, lty=2)
+  abline(h=median(bt_result$ev_mlpe_rmse), col="red",   lty=2, lwd=1.5)
+  abline(h=median(bt_result$ev_sn_rmse),   col="black", lty=2, lwd=1.5)
+  legend("topright",
+         c(paste0("MLPE (med=", round(median(bt_result$ev_mlpe_rmse),1), ")"),
+           paste0("SN (med=",   round(median(bt_result$ev_sn_rmse),1),   ")")),
+         col=c("red","black"), lty=c(1,2), pch=c(19,15))
+
+  par(mfrow=c(1,1))
 }
 
 plot_metricas_multi(bt_multi_balt,  "Baltimore")
 plot_metricas_multi(bt_multi_lanc,  "Lancaster")
 plot_metricas_multi(bt_multi_phil,  "Philadelphia")
 plot_metricas_multi(bt_multi_rich,  "Richmond")
+```
 
-
+```{r}
 # ── Tabela resumo multivariado ──────────────────────────────────────────────
 resultados_multi <- data.frame(
-  Loja      = c("Baltimore","Lancaster","Philadelphia","Richmond"),
-  MLPE_NMAE = c(median(bt_multi_balt$ev_mlpe), median(bt_multi_lanc$ev_mlpe),
-                median(bt_multi_phil$ev_mlpe), median(bt_multi_rich$ev_mlpe)),
-  SN_NMAE   = c(median(bt_multi_balt$ev_sn),   median(bt_multi_lanc$ev_sn),
-                median(bt_multi_phil$ev_sn),   median(bt_multi_rich$ev_sn))
+  Loja       = c("Baltimore","Lancaster","Philadelphia","Richmond"),
+  MLPE_NMAE  = c(median(bt_multi_balt$ev_mlpe_nmae), median(bt_multi_lanc$ev_mlpe_nmae),
+                 median(bt_multi_phil$ev_mlpe_nmae), median(bt_multi_rich$ev_mlpe_nmae)),
+  MLPE_RMSE  = c(median(bt_multi_balt$ev_mlpe_rmse), median(bt_multi_lanc$ev_mlpe_rmse),
+                 median(bt_multi_phil$ev_mlpe_rmse), median(bt_multi_rich$ev_mlpe_rmse)),
+  SN_NMAE    = c(median(bt_multi_balt$ev_sn_nmae),   median(bt_multi_lanc$ev_sn_nmae),
+                 median(bt_multi_phil$ev_sn_nmae),   median(bt_multi_rich$ev_sn_nmae)),
+  SN_RMSE    = c(median(bt_multi_balt$ev_sn_rmse),   median(bt_multi_lanc$ev_sn_rmse),
+                 median(bt_multi_phil$ev_sn_rmse),   median(bt_multi_rich$ev_sn_rmse)),
+  Melhor     = c(bt_multi_balt$melhor, bt_multi_lanc$melhor,
+                 bt_multi_phil$melhor, bt_multi_rich$melhor)
 )
-
-resultados_multi$Melhor <- ifelse(resultados_multi$MLPE_NMAE <= resultados_multi$SN_NMAE,
-                                   "MLPE", "SN")
 resultados_multi$Melhoria_pct <- round(
   (resultados_multi$SN_NMAE - resultados_multi$MLPE_NMAE) /
    resultados_multi$SN_NMAE * 100, 1)
