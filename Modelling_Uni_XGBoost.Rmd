@@ -16,16 +16,12 @@ library(dplyr)
 ```{r}
 # Get Data
 baltimore_uni <- readRDS("data_clean/baltimore_uni.rds")
-baltimore_multi <- readRDS("data_clean/baltimore_multi.rds")
 
 lancaster_uni <- readRDS("data_clean/lancaster_uni.rds")
-lancaster_multi <- readRDS("data_clean/lancaster_multi.rds")
 
 philadelphia_uni <- readRDS("data_clean/philadelphia_uni.rds")
-philadelphia_multi <- readRDS("data_clean/philadelphia_multi.rds")
 
 richmond_uni <- readRDS("data_clean/richmond_uni.rds")
-richmond_multi <- readRDS("data_clean/richmond_multi.rds")
 ```
 
 ```{r}
@@ -35,34 +31,17 @@ datasets_uni <- list(baltimore_uni = baltimore_uni,
                      philadelphia_uni = philadelphia_uni,
                      richmond_uni = richmond_uni
                      )
-datasets_multi <- list(baltimore_multi = baltimore_multi,
-                       lancaster_multi = lancaster_multi,
-                       philadelphia_multi = philadelphia_multi,
-                       richmond_multi = richmond_multi
-                       )
 ```
 
 
 ```{r}
-run.xgboost <- function(df, horizon = 7, iter = 20, city_name) {
+run.xgboost <- function(df, horizon = 7, iter = 20, city_name, params) {
   cat("---- Start Training for XGBoost: ", city_name, "----\n")
   importance_list <- list()
   models_list <- list()
   
   N <- nrow(df)
   window <- N - (iter * horizon) - horizon
-
-  params <- list(
-    objective = "reg:squarederror",
-    max_depth = 6,
-    eta = 0.05,
-    subsample = 0.8,
-    colsample_bytree = 0.7,
-    min_child_weight = 5,
-    gamma = 0.1,
-    lambda = 1,
-    alpha = 0.5
-  )
 
   predictions <- list()
 
@@ -92,11 +71,11 @@ run.xgboost <- function(df, horizon = 7, iter = 20, city_name) {
     xgb_model <- xgboost::xgb.train(
       params = params,
       data = d_train,
-      nrounds = 300
+      nrounds = 1000
     )
-    
+
     models_list[[i]] <- xgb_model
-    
+
     importance <- xgboost::xgb.importance(model = xgb_model)
     importance$iter <- i
     importance_list[[i]] <- importance
@@ -135,7 +114,7 @@ run.xgboost <- function(df, horizon = 7, iter = 20, city_name) {
 
   nmae_per_horizon <- colMeans(all_nmae)
   rmse_per_horizon <- sqrt(colMeans(all_rmse))
-  
+
   importance_df <- do.call(rbind, Filter(Negate(is.null), importance_list))
 
   importance_mean <- aggregate(Gain ~ Feature, data = importance_df, mean)
@@ -171,6 +150,20 @@ run.xgboost <- function(df, horizon = 7, iter = 20, city_name) {
 ```{r}
 # Start with the Univariate Problem
 out <- list()
+
+params <- list(
+    objective = "reg:squarederror",
+    max_depth = 6,
+    eta = 0.05,
+    subsample = 0.8,
+    colsample_bytree = 0.7,
+    min_child_weight = 5,
+    gamma = 0.1,
+    lambda = 1,
+    alpha = 0.5,
+    early_stopping_rounds = 50
+  )
+
 for (city_name in names(datasets_uni)) {
   df <- datasets_uni[[city_name]]
 
@@ -178,11 +171,32 @@ for (city_name in names(datasets_uni)) {
     df = df,
     horizon = 7,
     iter = 20,
-    city_name = city_name)
+    city_name = city_name,
+    params = params
+  )
 }
 
 all_predictions <- do.call(rbind, lapply(out, function(x) x$predictions))
 ```
+
+```{r}
+compute_weighted_score <- function(df, w_nmae = 0.4, w_rmse = 0.6) {
+  df %>%
+    group_by(horizon) %>%
+    mutate(
+      NMAE_norm = ifelse(max(NMAE) == min(NMAE), 0,
+                         (NMAE - min(NMAE)) / (max(NMAE) - min(NMAE))),
+
+      RMSE_norm = ifelse(max(RMSE) == min(RMSE), 0,
+                         (RMSE - min(RMSE)) / (max(RMSE) - min(RMSE)))
+    ) %>%
+    ungroup() %>%
+    mutate(
+      score = w_nmae * NMAE_norm + w_rmse * RMSE_norm
+    )
+}
+```
+
 
 ```{r, fig.width=18, fig.height=8}
 # Actual vs Predicted
@@ -265,11 +279,17 @@ for (city_name in names(out)) {
   print(ggplot(top_features, aes(x = reorder(Feature, Gain_mean), y = Gain_mean)) +
     geom_col() +
     coord_flip() +
+    ggtitle("City:", city_name) +
     theme_minimal()
   )
 }
 ```
 
+The model shows strong performance for short-to-medium horizons (h=3–5), but struggles significantly for longer horizons, particularly at h=7, where errors increase sharply.
 
+Feature importance analysis reveals that predictions are primarily driven by short-term lags (lag1 and lag7), indicating that the model relies heavily on recent observations and weekly seasonality.
 
+This explains the model's inability to capture sudden spikes, as it lacks contextual or exogenous information that could signal extreme events.
+
+As a result, the model performs well under normal conditions but systematically underestimates peak values, leading to large prediction errors.
 
