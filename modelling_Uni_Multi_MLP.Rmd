@@ -26,16 +26,40 @@ richmond_multi <- readRDS("data_clean/richmond_multi.rds")
 
 ```{r}
 
-# ── Parâmetros globais ──────────────────────────────────────────────────────
 NPRED <- 7
-LAGS  <- c(1, 2, 7)
-RUNS  <- 20    # número fixo de iterações
-STEP  <- 7     # cada iteração avança 1 semana
-K     <- 7     # sazonalidade semanal
-
-# ── Pesos para comparação de modelos (NMAE + RMSE) ─────────────────────────
+# LAGS removido — substituído pelos UNI_CONFIGS
+RUNS  <- 20
+STEP  <- 7
+K     <- 7
 W_NMAE <- 0.5
 W_RMSE <- 0.5
+
+UNI_CONFIGS <- list(
+  UNI_A = c(1, 7),
+  UNI_B = c(1, 2, 7),
+  UNI_C = c(1, 2, 7, 14),
+  UNI_D = c(1, 2, 7, 14, 28)
+)
+
+MULTI_CONFIGS <- list(
+  MULTI_A = c("Sales_Lag1", "TouristEvent_num", "IsHoliday"),
+  MULTI_B = c("Sales_Lag1", "Sales_Lag7", "TouristEvent_num", "IsHoliday"),
+  MULTI_C = c("Sales_Lag1", "Sales_Lag3", "Sales_Lag7",
+              "TouristEvent_num", "IsHoliday", "IsBlackFriday", "IsChristmas"),
+  MULTI_D = c("Sales_Lag1", "Sales_Lag3", "Sales_Lag7", "Sales_Lag28",
+              "rolling_mean_7", "TouristEvent_num", "IsHoliday",
+              "IsBlackFriday", "IsChristmas")
+)
+
+VINP      <- vector("list", length=2)
+VINP[[1]] <- list(c(1,2,7), c(1,7))
+VINP[[2]] <- list(c(1,7),   c(1,2,7))
+
+prepare_exogenous_config <- function(df_multi, n_rows, exo_cols) {
+  cols_disponiveis <- intersect(exo_cols, colnames(df_multi))
+  if (length(cols_disponiveis) == 0) return(NULL)
+  as.matrix(df_multi[1:n_rows, cols_disponiveis, drop=FALSE])
+}
 
 # ═══════════════════════════════════════════════════════════════════════════
 # FUNÇÃO DE PÓS-PROCESSAMENTO
@@ -93,67 +117,57 @@ weighted_score <- function(med_nmae, med_rmse,
 # ═══════════════════════════════════════════════════════════════════════════
 # FASE I — UNIVARIADO
 # ═══════════════════════════════════════════════════════════════════════════
-forecast_univariate_phaseI <- function(serie, loja_nome, lags=LAGS, npred=NPRED) {
-
+forecast_univariate_phaseI_configs <- function(serie, loja_nome,
+                                                configs=UNI_CONFIGS,
+                                                npred=NPRED) {
   S      <- serie
-  srange <- as.numeric(diff(quantile(S, probs=c(0.01, 0.99))))
-  D      <- CasesSeries(S, lags)
-  N      <- nrow(D)
-  TR     <- 1:(N - npred)
-  TS     <- (N - npred + 1):N
+  srange <- as.numeric(diff(quantile(S, probs=c(0.01,0.99))))
+  resultados_config <- list()
 
-  cat("\n======", loja_nome, "(Univariado Fase I) ======\n")
-  cat("Total exemplos D:", N, "| Treino:", length(TR), "| Teste:", length(TS), "\n")
+  for (cfg_nome in names(configs)) {
+    lags <- configs[[cfg_nome]]
+    cat("\n--", loja_nome, cfg_nome, "lags:", paste(lags, collapse=","), "--\n")
 
-  NN  <- fit(y~., D[TR,], model="mlpe",        search="heuristic")
-  RF  <- fit(y~., D[TR,], model="randomForest", search="heuristic")
+    D  <- CasesSeries(S, lags)
+    N  <- nrow(D)
+    TR <- 1:(N - npred)
+    TS <- (N - npred + 1):N
 
-  START <- N - npred + 1
-  PNN   <- postprocess_predictions(lforecast(NN, D, start=START, horizon=npred))
-  PRF   <- postprocess_predictions(lforecast(RF, D, start=START, horizon=npred))
-  PSN   <- as.integer(round(S[(length(S) - npred*2 + 1):(length(S) - npred)]))
+    NN  <- fit(y~., D[TR,], model="mlpe",        search="heuristic")
+    RF  <- fit(y~., D[TR,], model="randomForest", search="heuristic")
 
-  Y <- D[TS,]$y
+    START <- N - npred + 1
+    PNN   <- postprocess_predictions(lforecast(NN, D, start=START, horizon=npred))
+    PRF   <- postprocess_predictions(lforecast(RF, D, start=START, horizon=npred))
+    PSN   <- as.integer(round(S[(length(S)-npred*2+1):(length(S)-npred)]))
+    Y     <- D[TS,]$y
 
-  metrics_fn <- function(label, Pred) {
-    cat(label,
-        "| NMAE:", round(mmetric(Y, Pred, metric="NMAE", val=srange), 2), "%",
-        "| RMSE:", round(mmetric(Y, Pred, metric="RMSE"), 2), "\n")
+    nmae_nn <- mmetric(Y, PNN, metric="NMAE", val=srange)
+    nmae_rf <- mmetric(Y, PRF, metric="NMAE", val=srange)
+    nmae_sn <- mmetric(Y, PSN, metric="NMAE", val=srange)
+    rmse_nn <- mmetric(Y, PNN, metric="RMSE")
+    rmse_rf <- mmetric(Y, PRF, metric="RMSE")
+    rmse_sn <- mmetric(Y, PSN, metric="RMSE")
+
+    cat("NN | NMAE:", round(nmae_nn,2), "% | RMSE:", round(rmse_nn,2), "\n")
+    cat("RF | NMAE:", round(nmae_rf,2), "% | RMSE:", round(rmse_rf,2), "\n")
+    cat("SN | NMAE:", round(nmae_sn,2), "% | RMSE:", round(rmse_sn,2), "\n")
+
+    resultados_config[[cfg_nome]] <- list(
+      Y=Y, PNN=PNN, PRF=PRF, PSN=PSN,
+      nmae_nn=nmae_nn, rmse_nn=rmse_nn,
+      nmae_rf=nmae_rf, rmse_rf=rmse_rf,
+      nmae_sn=nmae_sn, rmse_sn=rmse_sn
+    )
   }
-
-  metrics_fn("NN ", PNN)
-  metrics_fn("RF ", PRF)
-  metrics_fn("SN ", PSN)
-
-  # Scoring ponderado
-  modelos   <- c("NN","RF","SN")
-  nmae_vals <- c(mmetric(Y,PNN,metric="NMAE",val=srange),
-                 mmetric(Y,PRF,metric="NMAE",val=srange),
-                 mmetric(Y,PSN,metric="NMAE",val=srange))
-  rmse_vals <- c(mmetric(Y,PNN,metric="RMSE"),
-                 mmetric(Y,PRF,metric="RMSE"),
-                 mmetric(Y,PSN,metric="RMSE"))
-
-  scores <- mapply(weighted_score,
-                   nmae_vals, rmse_vals,
-                   MoreArgs=list(all_nmae=nmae_vals, all_rmse=rmse_vals))
-  names(scores) <- modelos
-  cat("Score ponderado (menor=melhor):", paste(modelos, round(scores,3), sep="=", collapse=" | "), "\n")
-  cat("Melhor modelo Fase I:", modelos[which.min(scores)], "\n")
-
-  mgraph(Y, PNN, graph="REG",
-         main=paste0(loja_nome, " NN (NMAE=",
-                     round(mmetric(Y,PNN,metric="NMAE",val=srange),1), "%)"),
-         Grid=10, col=c("black","blue"), lty=1,
-         leg=list(pos="topright", leg=c("real","NN pred.")))
-
-  return(list(Y=Y, PNN=PNN, PRF=PRF, PSN=PSN, srange=srange))
+  return(resultados_config)
 }
 
-res_balt <- forecast_univariate_phaseI(baltimore_uni$Num_Customers,    "Baltimore")
-res_lanc <- forecast_univariate_phaseI(lancaster_uni$Num_Customers,    "Lancaster")
-res_phil <- forecast_univariate_phaseI(philadelphia_uni$Num_Customers, "Philadelphia")
-res_rich <- forecast_univariate_phaseI(richmond_uni$Num_Customers,     "Richmond")
+res_uni_balt <- forecast_univariate_phaseI_configs(baltimore_uni$Num_Customers, "Baltimore")
+res_uni_lanc <- forecast_univariate_phaseI_configs(lancaster_uni$Num_Customers, "Lancaster")
+res_uni_phil <- forecast_univariate_phaseI_configs(philadelphia_uni$Num_Customers, "Philadelphia")
+res_uni_rich <- forecast_univariate_phaseI_configs(richmond_uni$Num_Customers, "Richmond")
+
 ```
 
 
@@ -162,193 +176,204 @@ res_rich <- forecast_univariate_phaseI(richmond_uni$Num_Customers,     "Richmond
 # ═══════════════════════════════════════════════════════════════════════════
 # FASE II — UNIVARIADO — Growing Window com RUNS fixo
 # ═══════════════════════════════════════════════════════════════════════════
-backtesting_univariate <- function(serie, loja_nome, lags=LAGS,
-                                   npred=NPRED, runs=RUNS, step=STEP) {
+backtesting_univariate_configs <- function(serie, loja_nome,
+                                            configs=UNI_CONFIGS,
+                                            npred=NPRED, runs=RUNS, step=STEP) {
   S      <- serie
-  srange <- as.numeric(diff(quantile(S, probs=c(0.01, 0.99))))
-  D      <- CasesSeries(S, lags)
-  L      <- nrow(D)
+  srange <- as.numeric(diff(quantile(S, probs=c(0.01,0.99))))
+  resultados_config <- list()
 
-  # W calculado a partir do número fixo de iterações
-  W <- L - npred - (runs - 1) * step
-  if (W < 30) stop("Janela de treino demasiado pequena. Reduz RUNS.")
+  for (cfg_nome in names(configs)) {
+    lags <- configs[[cfg_nome]]
+    cat("\n===", loja_nome, cfg_nome, "lags:", paste(lags, collapse=","), "===\n")
 
-  cat("Loja:", loja_nome, "| nrow(D):", L,
-      "| W:", W, "dias | runs:", runs, "\n")
+    D <- CasesSeries(S, lags)
+    L <- nrow(D)
+    W <- L - npred - (runs - 1) * step
+    if (W < 30) { cat("  [SKIP] Janela demasiado pequena\n"); next }
 
-  ev_nn_nmae <- numeric(runs); ev_nn_rmse <- numeric(runs)
-  ev_rf_nmae <- numeric(runs); ev_rf_rmse <- numeric(runs)
-  ev_sn_nmae <- numeric(runs); ev_sn_rmse <- numeric(runs)
-  all_Y <- c(); all_PNN <- c(); all_PRF <- c()
+    cat("W:", W, "dias | runs:", runs, "\n")
 
-  for (b in 1:runs) {
+    ev_nn_nmae <- numeric(runs); ev_nn_rmse <- numeric(runs)
+    ev_rf_nmae <- numeric(runs); ev_rf_rmse <- numeric(runs)
+    ev_sn_nmae <- numeric(runs); ev_sn_rmse <- numeric(runs)
+    all_Y <- c(); all_PNN <- c(); all_PRF <- c()
 
-    H2   <- holdout(D$y, ratio=npred, mode="incremental",
-                    iter=b, window=W, increment=step)
-    M_nn <- fit(y~., D[H2$tr,], model="mlpe",         search="heuristic")
-    M_rf <- fit(y~., D[H2$tr,], model="randomForest",  search="heuristic")
+    for (b in 1:runs) {
+      H2   <- holdout(D$y, ratio=npred, mode="incremental",
+                      iter=b, window=W, increment=step)
+      M_nn <- fit(y~., D[H2$tr,], model="mlpe",        search="heuristic")
+      M_rf <- fit(y~., D[H2$tr,], model="randomForest", search="heuristic")
 
-    P_nn <- postprocess_predictions(lforecast(M_nn, D, start=(length(H2$tr)+1), horizon=npred))
-    P_rf <- postprocess_predictions(lforecast(M_rf, D, start=(length(H2$tr)+1), horizon=npred))
+      P_nn <- postprocess_predictions(lforecast(M_nn, D, start=(length(H2$tr)+1), horizon=npred))
+      P_rf <- postprocess_predictions(lforecast(M_rf, D, start=(length(H2$tr)+1), horizon=npred))
 
-    inicio_teste_S <- H2$ts[1] + max(lags)
-    P_sn <- as.integer(round(S[(inicio_teste_S - npred):(inicio_teste_S - 1)]))
+      inicio_S <- H2$ts[1] + max(lags)
+      P_sn     <- as.integer(round(S[(inicio_S - npred):(inicio_S - 1)]))
+      Y_real   <- D[H2$ts,]$y
 
-    Y_real <- D[H2$ts,]$y
+      ev_nn_nmae[b] <- mmetric(Y_real, P_nn, metric="NMAE", val=srange)
+      ev_nn_rmse[b] <- mmetric(Y_real, P_nn, metric="RMSE")
+      ev_rf_nmae[b] <- mmetric(Y_real, P_rf, metric="NMAE", val=srange)
+      ev_rf_rmse[b] <- mmetric(Y_real, P_rf, metric="RMSE")
+      ev_sn_nmae[b] <- mmetric(Y_real, P_sn, metric="NMAE", val=srange)
+      ev_sn_rmse[b] <- mmetric(Y_real, P_sn, metric="RMSE")
 
-    ev_nn_nmae[b] <- mmetric(Y_real, P_nn, metric="NMAE", val=srange)
-    ev_nn_rmse[b] <- mmetric(Y_real, P_nn, metric="RMSE")
-    ev_rf_nmae[b] <- mmetric(Y_real, P_rf, metric="NMAE", val=srange)
-    ev_rf_rmse[b] <- mmetric(Y_real, P_rf, metric="RMSE")
-    ev_sn_nmae[b] <- mmetric(Y_real, P_sn, metric="NMAE", val=srange)
-    ev_sn_rmse[b] <- mmetric(Y_real, P_sn, metric="RMSE")
+      cat("Iter:", b,
+          "| NN:", round(ev_nn_nmae[b],1), "/", round(ev_nn_rmse[b],1),
+          "| RF:", round(ev_rf_nmae[b],1), "/", round(ev_rf_rmse[b],1),
+          "| SN:", round(ev_sn_nmae[b],1), "/", round(ev_sn_rmse[b],1), "\n")
 
-    cat("Iter:", b,
-        "| NN NMAE:", round(ev_nn_nmae[b],1), "RMSE:", round(ev_nn_rmse[b],1),
-        "| RF NMAE:", round(ev_rf_nmae[b],1), "RMSE:", round(ev_rf_rmse[b],1),
-        "| SN NMAE:", round(ev_sn_nmae[b],1), "RMSE:", round(ev_sn_rmse[b],1), "\n")
+      all_Y   <- c(all_Y,   Y_real)
+      all_PNN <- c(all_PNN, P_nn)
+      all_PRF <- c(all_PRF, P_rf)
+    }
 
-    all_Y   <- c(all_Y,   Y_real)
-    all_PNN <- c(all_PNN, P_nn)
-    all_PRF <- c(all_PRF, P_rf)
+    med_nn_nmae <- median(ev_nn_nmae); med_nn_rmse <- median(ev_nn_rmse)
+    med_rf_nmae <- median(ev_rf_nmae); med_rf_rmse <- median(ev_rf_rmse)
+    med_sn_nmae <- median(ev_sn_nmae); med_sn_rmse <- median(ev_sn_rmse)
+
+    all_nmae <- c(med_nn_nmae, med_rf_nmae, med_sn_nmae)
+    all_rmse <- c(med_nn_rmse, med_rf_rmse, med_sn_rmse)
+    scores   <- c(
+      NN = weighted_score(med_nn_nmae, med_nn_rmse, all_nmae, all_rmse),
+      RF = weighted_score(med_rf_nmae, med_rf_rmse, all_nmae, all_rmse),
+      SN = weighted_score(med_sn_nmae, med_sn_rmse, all_nmae, all_rmse)
+    )
+    melhor <- names(which.min(scores))
+
+    cat("Medianas | NN:", round(med_nn_nmae,2), "%", round(med_nn_rmse,2),
+        "| RF:", round(med_rf_nmae,2), "%", round(med_rf_rmse,2),
+        "| SN:", round(med_sn_nmae,2), "%", round(med_sn_rmse,2), "\n")
+    cat("Score ponderado:", paste(names(scores), round(scores,3), sep="=", collapse=" | "), "\n")
+    cat("Melhor:", melhor, "\n")
+
+    # Gráfico agregado por config
+    plot(all_Y, type="l", col="black",
+         main=paste0(loja_nome, " ", cfg_nome, " — Growing Window"),
+         ylab="Num_Customers", xlab="Observações de teste acumuladas")
+    lines(all_PNN, col="blue", lty=2)
+    lines(all_PRF, col="red",  lty=3)
+    legend("topright", c("Real","NN","RF"),
+           col=c("black","blue","red"), lty=c(1,2,3))
+
+    resultados_config[[cfg_nome]] <- list(
+      ev_nn_nmae=ev_nn_nmae, ev_nn_rmse=ev_nn_rmse,
+      ev_rf_nmae=ev_rf_nmae, ev_rf_rmse=ev_rf_rmse,
+      ev_sn_nmae=ev_sn_nmae, ev_sn_rmse=ev_sn_rmse,
+      med_nn_nmae=med_nn_nmae, med_nn_rmse=med_nn_rmse,
+      med_rf_nmae=med_rf_nmae, med_rf_rmse=med_rf_rmse,
+      med_sn_nmae=med_sn_nmae, med_sn_rmse=med_sn_rmse,
+      scores=scores, melhor=melhor
+    )
   }
-
-  # Medianas
-  med_nn_nmae <- median(ev_nn_nmae); med_nn_rmse <- median(ev_nn_rmse)
-  med_rf_nmae <- median(ev_rf_nmae); med_rf_rmse <- median(ev_rf_rmse)
-  med_sn_nmae <- median(ev_sn_nmae); med_sn_rmse <- median(ev_sn_rmse)
-
-  cat("\n---", loja_nome, "---\n")
-  cat("NN  | mediana NMAE:", round(med_nn_nmae,2), "% | mediana RMSE:", round(med_nn_rmse,2), "\n")
-  cat("RF  | mediana NMAE:", round(med_rf_nmae,2), "% | mediana RMSE:", round(med_rf_rmse,2), "\n")
-  cat("SN  | mediana NMAE:", round(med_sn_nmae,2), "% | mediana RMSE:", round(med_sn_rmse,2), "\n")
-
-  # Scoring ponderado
-  all_nmae <- c(med_nn_nmae, med_rf_nmae, med_sn_nmae)
-  all_rmse <- c(med_nn_rmse, med_rf_rmse, med_sn_rmse)
-  scores   <- c(
-    NN = weighted_score(med_nn_nmae, med_nn_rmse, all_nmae, all_rmse),
-    RF = weighted_score(med_rf_nmae, med_rf_rmse, all_nmae, all_rmse),
-    SN = weighted_score(med_sn_nmae, med_sn_rmse, all_nmae, all_rmse)
-  )
-  melhor <- names(which.min(scores))
-  cat("Score ponderado (menor=melhor):",
-      paste(names(scores), round(scores,3), sep="=", collapse=" | "), "\n")
-  cat("Melhor modelo:", melhor, "\n")
-  cat("Melhoria vs SN:",
-      round((med_sn_nmae - min(med_nn_nmae, med_rf_nmae)) / med_sn_nmae * 100, 1), "%\n")
-
-  # Gráfico agregado
-  plot(all_Y, type="l", col="black",
-       main=paste0(loja_nome, " — Growing Window (", runs, " iterações)"),
-       ylab="Num_Customers", xlab="Observações de teste acumuladas")
-  lines(all_PNN, col="blue", lty=2)
-  lines(all_PRF, col="red",  lty=3)
-  legend("topright", c("Real","NN","RF"),
-         col=c("black","blue","red"), lty=c(1,2,3))
-
-  return(list(
-    ev_nn_nmae=ev_nn_nmae, ev_nn_rmse=ev_nn_rmse,
-    ev_rf_nmae=ev_rf_nmae, ev_rf_rmse=ev_rf_rmse,
-    ev_sn_nmae=ev_sn_nmae, ev_sn_rmse=ev_sn_rmse,
-    scores=scores, melhor=melhor
-  ))
+  return(resultados_config)
 }
 
 ```
 
 ```{r}
-bt_balt <- backtesting_univariate(baltimore_uni$Num_Customers,    "Baltimore")
-bt_lanc <- backtesting_univariate(lancaster_uni$Num_Customers,    "Lancaster")
-bt_phil <- backtesting_univariate(philadelphia_uni$Num_Customers, "Philadelphia")
-bt_rich <- backtesting_univariate(richmond_uni$Num_Customers,     "Richmond")
+bt_uni_balt <- backtesting_univariate_configs(baltimore_uni$Num_Customers,    "Baltimore")
+bt_uni_lanc <- backtesting_univariate_configs(lancaster_uni$Num_Customers,    "Lancaster")
+bt_uni_phil <- backtesting_univariate_configs(philadelphia_uni$Num_Customers, "Philadelphia")
+bt_uni_rich <- backtesting_univariate_configs(richmond_uni$Num_Customers,     "Richmond")
 ```
 
 ```{r}
 # ── Tabela resumo univariado ────────────────────────────────────────────────
-resultados <- data.frame(
-  Loja        = c("Baltimore","Lancaster","Philadelphia","Richmond"),
-  NN_NMAE     = c(median(bt_balt$ev_nn_nmae), median(bt_lanc$ev_nn_nmae),
-                  median(bt_phil$ev_nn_nmae), median(bt_rich$ev_nn_nmae)),
-  NN_RMSE     = c(median(bt_balt$ev_nn_rmse), median(bt_lanc$ev_nn_rmse),
-                  median(bt_phil$ev_nn_rmse), median(bt_rich$ev_nn_rmse)),
-  RF_NMAE     = c(median(bt_balt$ev_rf_nmae), median(bt_lanc$ev_rf_nmae),
-                  median(bt_phil$ev_rf_nmae), median(bt_rich$ev_rf_nmae)),
-  RF_RMSE     = c(median(bt_balt$ev_rf_rmse), median(bt_lanc$ev_rf_rmse),
-                  median(bt_phil$ev_rf_rmse), median(bt_rich$ev_rf_rmse)),
-  SN_NMAE     = c(median(bt_balt$ev_sn_nmae), median(bt_lanc$ev_sn_nmae),
-                  median(bt_phil$ev_sn_nmae), median(bt_rich$ev_sn_nmae)),
-  SN_RMSE     = c(median(bt_balt$ev_sn_rmse), median(bt_lanc$ev_sn_rmse),
-                  median(bt_phil$ev_sn_rmse), median(bt_rich$ev_sn_rmse)),
-  Melhor      = c(bt_balt$melhor, bt_lanc$melhor, bt_phil$melhor, bt_rich$melhor)
+build_tabela_uni <- function(bt_list, loja_nome) {
+  rows <- lapply(names(bt_list), function(cfg) {
+    r <- bt_list[[cfg]]
+    data.frame(
+      Loja   = loja_nome,
+      Config = cfg,
+      NN_NMAE = round(r$med_nn_nmae, 2),
+      NN_RMSE = round(r$med_nn_rmse, 2),
+      RF_NMAE = round(r$med_rf_nmae, 2),
+      RF_RMSE = round(r$med_rf_rmse, 2),
+      SN_NMAE = round(r$med_sn_nmae, 2),
+      SN_RMSE = round(r$med_sn_rmse, 2),
+      Melhor  = r$melhor,
+      Melhoria_pct = round(
+        (r$med_sn_nmae - min(r$med_nn_nmae, r$med_rf_nmae)) / r$med_sn_nmae * 100, 1)
+    )
+  })
+  do.call(rbind, rows)
+}
+
+tabela_uni <- rbind(
+  build_tabela_uni(bt_uni_balt, "Baltimore"),
+  build_tabela_uni(bt_uni_lanc, "Lancaster"),
+  build_tabela_uni(bt_uni_phil, "Philadelphia"),
+  build_tabela_uni(bt_uni_rich, "Richmond")
 )
-resultados$Melhoria_pct <- round(
-  (resultados$SN_NMAE - pmin(resultados$NN_NMAE, resultados$RF_NMAE)) /
-   resultados$SN_NMAE * 100, 1)
-print(resultados)
+print(tabela_uni)
 ```
 
 
 ```{r}
 # ── Gráfico NMAE + RMSE por iteração ───────────────────────────────────────
 plot_metricas <- function(bt_result, loja_nome) {
-  runs  <- length(bt_result$ev_nn_nmae)
-  iters <- 1:runs
+  for (cfg_nome in names(bt_result)) {
+    r     <- bt_result[[cfg_nome]]
+    runs  <- length(r$ev_nn_nmae)
+    iters <- 1:runs
 
-  par(mfrow=c(1,2))
+    par(mfrow=c(1,2))
 
-  # NMAE
-  ylim_nmae <- range(c(bt_result$ev_nn_nmae, bt_result$ev_rf_nmae, bt_result$ev_sn_nmae))
-  plot(iters, bt_result$ev_nn_nmae, type="b", col="blue", pch=19, lty=1,
-       ylim=ylim_nmae, main=paste0(loja_nome, " — NMAE por iteração"),
-       xlab="Iteração", ylab="NMAE (%)")
-  lines(iters, bt_result$ev_rf_nmae, type="b", col="red",   pch=17, lty=2)
-  lines(iters, bt_result$ev_sn_nmae, type="b", col="black", pch=15, lty=3)
-  abline(h=median(bt_result$ev_nn_nmae), col="blue",  lty=2, lwd=1.5)
-  abline(h=median(bt_result$ev_rf_nmae), col="red",   lty=2, lwd=1.5)
-  abline(h=median(bt_result$ev_sn_nmae), col="black", lty=2, lwd=1.5)
-  legend("topright",
-         c(paste0("NN (med=",  round(median(bt_result$ev_nn_nmae),1), "%)"),
-           paste0("RF (med=",  round(median(bt_result$ev_rf_nmae),1), "%)"),
-           paste0("SN (med=",  round(median(bt_result$ev_sn_nmae),1), "%)")),
-         col=c("blue","red","black"), lty=c(1,2,3), pch=c(19,17,15))
+    # NMAE
+    ylim_nmae <- range(c(r$ev_nn_nmae, r$ev_rf_nmae, r$ev_sn_nmae))
+    plot(iters, r$ev_nn_nmae, type="b", col="blue", pch=19, lty=1,
+         ylim=ylim_nmae,
+         main=paste0(loja_nome, " ", cfg_nome, " — NMAE por iteração"),
+         xlab="Iteração", ylab="NMAE (%)")
+    lines(iters, r$ev_rf_nmae, type="b", col="red",   pch=17, lty=2)
+    lines(iters, r$ev_sn_nmae, type="b", col="black", pch=15, lty=3)
+    abline(h=median(r$ev_nn_nmae), col="blue",  lty=2, lwd=1.5)
+    abline(h=median(r$ev_rf_nmae), col="red",   lty=2, lwd=1.5)
+    abline(h=median(r$ev_sn_nmae), col="black", lty=2, lwd=1.5)
+    legend("topright",
+           c(paste0("NN (med=", round(median(r$ev_nn_nmae),1), "%)"),
+             paste0("RF (med=", round(median(r$ev_rf_nmae),1), "%)"),
+             paste0("SN (med=", round(median(r$ev_sn_nmae),1), "%)")),
+           col=c("blue","red","black"), lty=c(1,2,3), pch=c(19,17,15))
 
-  # RMSE
-  ylim_rmse <- range(c(bt_result$ev_nn_rmse, bt_result$ev_rf_rmse, bt_result$ev_sn_rmse))
-  plot(iters, bt_result$ev_nn_rmse, type="b", col="blue", pch=19, lty=1,
-       ylim=ylim_rmse, main=paste0(loja_nome, " — RMSE por iteração"),
-       xlab="Iteração", ylab="RMSE")
-  lines(iters, bt_result$ev_rf_rmse, type="b", col="red",   pch=17, lty=2)
-  lines(iters, bt_result$ev_sn_rmse, type="b", col="black", pch=15, lty=3)
-  abline(h=median(bt_result$ev_nn_rmse), col="blue",  lty=2, lwd=1.5)
-  abline(h=median(bt_result$ev_rf_rmse), col="red",   lty=2, lwd=1.5)
-  abline(h=median(bt_result$ev_sn_rmse), col="black", lty=2, lwd=1.5)
-  legend("topright",
-         c(paste0("NN (med=",  round(median(bt_result$ev_nn_rmse),1), ")"),
-           paste0("RF (med=",  round(median(bt_result$ev_rf_rmse),1), ")"),
-           paste0("SN (med=",  round(median(bt_result$ev_sn_rmse),1), ")")),
-         col=c("blue","red","black"), lty=c(1,2,3), pch=c(19,17,15))
+    # RMSE
+    ylim_rmse <- range(c(r$ev_nn_rmse, r$ev_rf_rmse, r$ev_sn_rmse))
+    plot(iters, r$ev_nn_rmse, type="b", col="blue", pch=19, lty=1,
+         ylim=ylim_rmse,
+         main=paste0(loja_nome, " ", cfg_nome, " — RMSE por iteração"),
+         xlab="Iteração", ylab="RMSE")
+    lines(iters, r$ev_rf_rmse, type="b", col="red",   pch=17, lty=2)
+    lines(iters, r$ev_sn_rmse, type="b", col="black", pch=15, lty=3)
+    abline(h=median(r$ev_nn_rmse), col="blue",  lty=2, lwd=1.5)
+    abline(h=median(r$ev_rf_rmse), col="red",   lty=2, lwd=1.5)
+    abline(h=median(r$ev_sn_rmse), col="black", lty=2, lwd=1.5)
+    legend("topright",
+           c(paste0("NN (med=", round(median(r$ev_nn_rmse),1), ")"),
+             paste0("RF (med=", round(median(r$ev_rf_rmse),1), ")"),
+             paste0("SN (med=", round(median(r$ev_sn_rmse),1), ")")),
+           col=c("blue","red","black"), lty=c(1,2,3), pch=c(19,17,15))
 
-  par(mfrow=c(1,1))
+    par(mfrow=c(1,1))
+  }
 }
 
-plot_metricas(bt_balt,  "Baltimore")
-plot_metricas(bt_lanc,  "Lancaster")
-plot_metricas(bt_phil,  "Philadelphia")
-plot_metricas(bt_rich,  "Richmond")
+plot_metricas(bt_uni_balt, "Baltimore")
+plot_metricas(bt_uni_lanc, "Lancaster")
+plot_metricas(bt_uni_phil, "Philadelphia")
+plot_metricas(bt_uni_rich, "Richmond")
 ```
 
 
 ```{r}
 # ── Previsão final univariada (com pós-processamento) ──────────────────────
-previsao_final <- function(serie, loja_nome, lags=LAGS, npred=NPRED,
+previsao_final <- function(serie, loja_nome, lags, npred=NPRED,
                            datas_futuras=NULL, melhor_modelo="NN") {
   S <- serie
   D <- CasesSeries(S, lags)
-
   modelo_final <- fit(y~., D, model=ifelse(melhor_modelo=="RF","randomForest","mlpe"),
                       search="heuristic")
-
   START   <- nrow(D) + 1
   P_raw   <- lforecast(modelo_final, D, start=START, horizon=npred)
   P_final <- postprocess_predictions(P_raw, datas_futuras)
@@ -370,20 +395,43 @@ previsao_final <- function(serie, loja_nome, lags=LAGS, npred=NPRED,
   return(P_final)
 }
 
+# ── Identificar a melhor config e modelo por loja ──────────────────────────
+get_melhor_uni <- function(bt_uni) {
+  # Para cada config, pega no score do melhor modelo (NN ou RF)
+  scores_por_config <- sapply(names(bt_uni), function(cfg) {
+    min(bt_uni[[cfg]]$scores[c("NN","RF")])
+  })
+  melhor_cfg   <- names(which.min(scores_por_config))
+  melhor_modelo <- names(which.min(bt_uni[[melhor_cfg]]$scores[c("NN","RF")]))
+  melhor_lags  <- UNI_CONFIGS[[melhor_cfg]]
+  cat("Melhor config:", melhor_cfg, "| Melhor modelo:", melhor_modelo,
+      "| Lags:", paste(melhor_lags, collapse=","), "\n")
+  return(list(cfg=melhor_cfg, modelo=melhor_modelo, lags=melhor_lags))
+}
+
 datas_futuras <- seq(as.Date("2014-06-15"), by="day", length.out=7)
 
+melhor_balt <- get_melhor_uni(bt_uni_balt)
+melhor_lanc <- get_melhor_uni(bt_uni_lanc)
+melhor_phil <- get_melhor_uni(bt_uni_phil)
+melhor_rich <- get_melhor_uni(bt_uni_rich)
+
 prev_balt <- previsao_final(baltimore_uni$Num_Customers, "Baltimore",
+                             lags=melhor_balt$lags,
                              datas_futuras=datas_futuras,
-                             melhor_modelo=bt_balt$melhor)
+                             melhor_modelo=melhor_balt$modelo)
 prev_lanc <- previsao_final(lancaster_uni$Num_Customers, "Lancaster",
+                             lags=melhor_lanc$lags,
                              datas_futuras=datas_futuras,
-                             melhor_modelo=bt_lanc$melhor)
+                             melhor_modelo=melhor_lanc$modelo)
 prev_phil <- previsao_final(philadelphia_uni$Num_Customers, "Philadelphia",
+                             lags=melhor_phil$lags,
                              datas_futuras=datas_futuras,
-                             melhor_modelo=bt_phil$melhor)
+                             melhor_modelo=melhor_phil$modelo)
 prev_rich <- previsao_final(richmond_uni$Num_Customers, "Richmond",
+                             lags=melhor_rich$lags,
                              datas_futuras=datas_futuras,
-                             melhor_modelo=bt_rich$melhor)
+                             melhor_modelo=melhor_rich$modelo)
 ```
 
 ```{r}
@@ -398,19 +446,6 @@ library(forecast)
 library(rminer)
 
 # ── Funções do multi-utils.R embutidas ──────────────────────────────────────
-
-conv_ts <- function(x, frequency=1, labels=NULL) {
-  if (is.vector(x)) {
-    x <- ts(as.matrix(cbind(x)), frequency=frequency)
-    if (is.null(labels)) labels <- "x_1"
-  } else if (is.data.frame(x) || is.matrix(x)) {
-    if (is.null(labels) && !is.null(names(x))) labels <- names(x) else labels <- paste("x_", 1:ncol(x), sep="")
-    if (is.data.frame(x)) x <- as.matrix(x)
-    x <- ts(x, frequency=frequency)
-  }
-  attr(x, "dimnames")[[2]] <- labels
-  return(x)
-}
 
 vreverse <- function(x) x[length(x):1]
 
@@ -496,17 +531,6 @@ lforecastm <- function(model, h=10, exogen=NULL) {
 ```
 
 ```{r}
-# ── Parâmetros ──────────────────────────────────────────────────────────────
-NPRED     <- 7
-W_SEMANAS <- 25
-K         <- 7   # sazonalidade semanal
-
-# VINP: lags para cada variável endógena
-# Var 1 (Num_Customers): lags 1,2,7 de Num_Customers + lags 1,7 de Sales
-# Var 2 (Sales):         lags 1,7 de Num_Customers   + lags 1,2,7 de Sales
-VINP        <- vector("list", length=2)
-VINP[[1]]   <- list(c(1,2,7), c(1,7))
-VINP[[2]]   <- list(c(1,7),   c(1,2,7))
 
 # ── Função auxiliar de gráfico e métricas para 2 variáveis ─────────────────
 fshow_multi <- function(Y, Pred1, Pred2, method, loja_nome) {
@@ -539,15 +563,7 @@ prepare_endogenous <- function(df_multi) {
   return(mtr_end)
 }
 
-# ── Preparar variáveis exógenas ─────────────────────────────────────────────
-prepare_exogenous <- function(df_multi, n_rows) {
-  exo_cols <- intersect(colnames(df_multi),
-                        c("TouristEvent_num","IsHoliday",
-                          "IsBlackFriday","IsChristmas","Pct_On_Sale"))
-  if (length(exo_cols) == 0) return(NULL)
-  exogen <- as.matrix(df_multi[1:n_rows, exo_cols])
-  return(exogen)
-}
+
 ```
 
 
@@ -555,32 +571,48 @@ prepare_exogenous <- function(df_multi, n_rows) {
 # ═══════════════════════════════════════════════════════════════════════════
 # FASE I — MULTIVARIADO
 # ═══════════════════════════════════════════════════════════════════════════
-forecast_multi_phaseI <- function(df_multi, loja_nome, npred=NPRED) {
+forecast_multi_phaseI_configs <- function(df_multi, loja_nome,    # ← nome alterado
+                                           configs=MULTI_CONFIGS,  # ← novo argumento
+                                           npred=NPRED) {
   mtr_end <- prepare_endogenous(df_multi)
   N       <- nrow(mtr_end)
-  exogen  <- prepare_exogenous(df_multi, N)
-  hd      <- holdout(mtr_end[,1], ratio=npred, mode="order")
-  Y       <- mtr_end[hd$ts,]
-  exotr   <- if (!is.null(exogen)) exogen[hd$tr,,drop=FALSE] else NULL
-  exots   <- if (!is.null(exogen)) exogen[hd$ts,,drop=FALSE] else NULL
+  resultados_config <- list()                                       # ← novo
 
-  cat("\n======", loja_nome, "(Multivariado Fase I) ======\n")
-  cat("N:", N, "| Treino:", length(hd$tr), "| Teste:", npred, "\n")
+  for (cfg_nome in names(configs)) {                               # ← novo loop
+    exo_cols <- configs[[cfg_nome]]                                # ← novo
+    cat("\n--", loja_nome, cfg_nome, "--\n")
+    cat("Exógenas:", paste(exo_cols, collapse=", "), "\n")
 
-  MNN  <- mfit(mtr_end[hd$tr,], "mlpe", VINP, exogen=exotr)
-  Pred <- lforecastm(MNN, h=npred, exogen=exots)
+    exogen <- prepare_exogenous_config(df_multi, N, exo_cols)     # ← alterado
+    hd     <- holdout(mtr_end[,1], ratio=npred, mode="order")
+    Y      <- mtr_end[hd$ts,]
+    exotr  <- if (!is.null(exogen)) exogen[hd$tr,,drop=FALSE] else NULL
+    exots  <- if (!is.null(exogen)) exogen[hd$ts,,drop=FALSE] else NULL
 
-  # Pós-processamento apenas em Num_Customers
-  Pred[[1]] <- postprocess_predictions(Pred[[1]])
+    cat("\n======", loja_nome, "(Multivariado Fase I) ======\n")
+    cat("N:", N, "| Treino:", length(hd$tr), "| Teste:", npred, "\n")
 
-  fshow_multi(Y, Pred[[1]], Pred[[2]], "MLPE", loja_nome)
-  return(list(Y=Y, MLPE=Pred))
+    MNN  <- mfit(mtr_end[hd$tr,], "mlpe", VINP, exogen=exotr)
+    Pred <- lforecastm(MNN, h=npred, exogen=exots)
+    Pred[[1]] <- postprocess_predictions(Pred[[1]])
+
+    fshow_multi(Y, Pred[[1]], Pred[[2]], cfg_nome, loja_nome)     # ← cfg_nome em vez de "MLPE"
+
+    srange1 <- as.numeric(diff(quantile(mtr_end[,1], probs=c(0.01,0.99))))
+    resultados_config[[cfg_nome]] <- list(                        # ← novo — guarda por config
+      Y=Y, Pred=Pred,
+      nmae=mmetric(Y[,1], Pred[[1]], metric="NMAE", val=srange1),
+      rmse=mmetric(Y[,1], Pred[[1]], metric="RMSE")
+    )
+  }                                                                # ← fecho do loop
+  return(resultados_config)                                        # ← alterado
 }
 
-res_multi_balt <- forecast_multi_phaseI(baltimore_multi,    "Baltimore")
-res_multi_lanc <- forecast_multi_phaseI(lancaster_multi,    "Lancaster")
-res_multi_phil <- forecast_multi_phaseI(philadelphia_multi, "Philadelphia")
-res_multi_rich <- forecast_multi_phaseI(richmond_multi,     "Richmond")
+# ← nomes alterados de res_multi_* para res_multi_*
+res_multi_balt <- forecast_multi_phaseI_configs(baltimore_multi,    "Baltimore")
+res_multi_lanc <- forecast_multi_phaseI_configs(lancaster_multi,    "Lancaster")
+res_multi_phil <- forecast_multi_phaseI_configs(philadelphia_multi, "Philadelphia")
+res_multi_rich <- forecast_multi_phaseI_configs(richmond_multi,     "Richmond")
 
 ```
 
@@ -588,154 +620,221 @@ res_multi_rich <- forecast_multi_phaseI(richmond_multi,     "Richmond")
 # ═══════════════════════════════════════════════════════════════════════════
 # FASE II — MULTIVARIADO — Growing Window com RUNS fixo
 # ═══════════════════════════════════════════════════════════════════════════
-backtesting_multi <- function(df_multi, loja_nome,
-                              npred=NPRED, runs=RUNS, step=STEP) {
+backtesting_multi_configs <- function(df_multi, loja_nome,         # ← nome alterado
+                                       configs=MULTI_CONFIGS,       # ← novo argumento
+                                       npred=NPRED, runs=RUNS, step=STEP) {
 
   mtr_end  <- prepare_endogenous(df_multi)
   N        <- nrow(mtr_end)
-  exogen   <- prepare_exogenous(df_multi, N)
   srange_c <- as.numeric(diff(quantile(mtr_end[,1], probs=c(0.01,0.99))))
+  W        <- N - npred - (runs - 1) * step
+  if (W < 30) stop("Janela demasiado pequena.")
 
-  # W calculado a partir do número fixo de iterações
-  W <- N - npred - (runs - 1) * step
-  if (W < 30) stop("Janela de treino demasiado pequena. Reduz RUNS.")
+  cat("Loja:", loja_nome, "| N:", N, "| W:", W, "| runs:", runs, "\n")
+  resultados_config <- list()                                       # ← novo
 
-  cat("Loja:", loja_nome, "| N:", N,
-      "| W:", W, "dias | runs:", runs, "\n")
+  for (cfg_nome in names(configs)) {                               # ← novo loop
+    exo_cols    <- configs[[cfg_nome]]                             # ← novo
+    cat("\n===", loja_nome, cfg_nome, "===\n")
+    cat("Exógenas:", paste(exo_cols, collapse=", "), "\n")
 
-  ev_mlpe_nmae <- numeric(runs); ev_mlpe_rmse <- numeric(runs)
-  ev_sn_nmae   <- numeric(runs); ev_sn_rmse   <- numeric(runs)
-  all_Y <- c(); all_MLPE <- c()
+    exogen_full <- prepare_exogenous_config(df_multi, N, exo_cols) # ← alterado (era prepare_exogenous)
 
-  for (b in 1:runs) {
+    ev_mlpe_nmae <- numeric(runs); ev_mlpe_rmse <- numeric(runs)
+    ev_sn_nmae   <- numeric(runs); ev_sn_rmse   <- numeric(runs)
+    all_Y <- c(); all_MLPE <- c()
 
-    H2 <- holdout(mtr_end[,1], ratio=npred, mode="incremental",
-                  iter=b, window=W, increment=step)
+    for (b in 1:runs) {
+      H2 <- holdout(mtr_end[,1], ratio=npred, mode="incremental",
+                    iter=b, window=W, increment=step)
 
-    Y_real <- mtr_end[H2$ts, 1]
-    exotr  <- if (!is.null(exogen)) exogen[H2$tr,,drop=FALSE] else NULL
-    exots  <- if (!is.null(exogen)) exogen[H2$ts,,drop=FALSE] else NULL
+      Y_real <- mtr_end[H2$ts, 1]
+      exotr  <- if (!is.null(exogen_full)) exogen_full[H2$tr,,drop=FALSE] else NULL
+      exots  <- if (!is.null(exogen_full)) exogen_full[H2$ts,,drop=FALSE] else NULL
 
-    MNN    <- mfit(mtr_end[H2$tr,], "mlpe", VINP, exogen=exotr)
-    Pred   <- lforecastm(MNN, h=npred, exogen=exots)
-    P_mlpe <- postprocess_predictions(Pred[[1]])
+      MNN    <- mfit(mtr_end[H2$tr,], "mlpe", VINP, exogen=exotr)
+      Pred   <- lforecastm(MNN, h=npred, exogen=exots)
+      P_mlpe <- postprocess_predictions(Pred[[1]])
+      P_sn   <- as.integer(round(mtr_end[(H2$ts[1]-npred):(H2$ts[1]-1), 1]))
 
-    P_sn <- as.integer(round(mtr_end[(H2$ts[1] - npred):(H2$ts[1] - 1), 1]))
+      ev_mlpe_nmae[b] <- mmetric(Y_real, P_mlpe, metric="NMAE", val=srange_c)
+      ev_mlpe_rmse[b] <- mmetric(Y_real, P_mlpe, metric="RMSE")
+      ev_sn_nmae[b]   <- mmetric(Y_real, P_sn,   metric="NMAE", val=srange_c)
+      ev_sn_rmse[b]   <- mmetric(Y_real, P_sn,   metric="RMSE")
 
-    ev_mlpe_nmae[b] <- mmetric(Y_real, P_mlpe, metric="NMAE", val=srange_c)
-    ev_mlpe_rmse[b] <- mmetric(Y_real, P_mlpe, metric="RMSE")
-    ev_sn_nmae[b]   <- mmetric(Y_real, P_sn,   metric="NMAE", val=srange_c)
-    ev_sn_rmse[b]   <- mmetric(Y_real, P_sn,   metric="RMSE")
+      cat("Iter:", b,
+          "| MLPE:", round(ev_mlpe_nmae[b],1), "/", round(ev_mlpe_rmse[b],1),
+          "| SN:",   round(ev_sn_nmae[b],1),   "/", round(ev_sn_rmse[b],1), "\n")
 
-    cat("Iter:", b,
-        "| MLPE NMAE:", round(ev_mlpe_nmae[b],1), "RMSE:", round(ev_mlpe_rmse[b],1),
-        "| SN NMAE:",   round(ev_sn_nmae[b],1),   "RMSE:", round(ev_sn_rmse[b],1), "\n")
+      all_Y    <- c(all_Y,    Y_real)
+      all_MLPE <- c(all_MLPE, P_mlpe)
+    }
 
-    all_Y    <- c(all_Y,    Y_real)
-    all_MLPE <- c(all_MLPE, P_mlpe)
-  }
+    med_mlpe_nmae <- median(ev_mlpe_nmae); med_mlpe_rmse <- median(ev_mlpe_rmse)
+    med_sn_nmae   <- median(ev_sn_nmae);   med_sn_rmse   <- median(ev_sn_rmse)
 
-  med_mlpe_nmae <- median(ev_mlpe_nmae); med_mlpe_rmse <- median(ev_mlpe_rmse)
-  med_sn_nmae   <- median(ev_sn_nmae);   med_sn_rmse   <- median(ev_sn_rmse)
+    cat("\n---", loja_nome, cfg_nome, "---\n")                    # ← cfg_nome adicionado
+    cat("MLPE | mediana NMAE:", round(med_mlpe_nmae,2), "% | mediana RMSE:", round(med_mlpe_rmse,2), "\n")
+    cat("SN   | mediana NMAE:", round(med_sn_nmae,2),   "% | mediana RMSE:", round(med_sn_rmse,2),   "\n")
 
-  cat("\n---", loja_nome, "(Multivariado) ---\n")
-  cat("MLPE | mediana NMAE:", round(med_mlpe_nmae,2), "% | mediana RMSE:", round(med_mlpe_rmse,2), "\n")
-  cat("SN   | mediana NMAE:", round(med_sn_nmae,2),   "% | mediana RMSE:", round(med_sn_rmse,2),   "\n")
+    all_nmae <- c(med_mlpe_nmae, med_sn_nmae)
+    all_rmse <- c(med_mlpe_rmse, med_sn_rmse)
+    scores   <- c(
+      MLPE = weighted_score(med_mlpe_nmae, med_mlpe_rmse, all_nmae, all_rmse),
+      SN   = weighted_score(med_sn_nmae,   med_sn_rmse,   all_nmae, all_rmse)
+    )
+    melhor <- names(which.min(scores))
+    cat("Score ponderado:", paste(names(scores), round(scores,3), sep="=", collapse=" | "), "\n")
+    cat("Melhor:", melhor, "| Melhoria vs SN:",
+        round((med_sn_nmae - med_mlpe_nmae) / med_sn_nmae * 100, 1), "%\n")
 
-  all_nmae <- c(med_mlpe_nmae, med_sn_nmae)
-  all_rmse <- c(med_mlpe_rmse, med_sn_rmse)
-  scores   <- c(
-    MLPE = weighted_score(med_mlpe_nmae, med_mlpe_rmse, all_nmae, all_rmse),
-    SN   = weighted_score(med_sn_nmae,   med_sn_rmse,   all_nmae, all_rmse)
-  )
-  melhor <- names(which.min(scores))
-  cat("Score ponderado:", paste(names(scores), round(scores,3), sep="=", collapse=" | "), "\n")
-  cat("Melhor modelo:", melhor, "\n")
-  cat("Melhoria vs SN:",
-      round((med_sn_nmae - med_mlpe_nmae) / med_sn_nmae * 100, 1), "%\n")
+    plot(all_Y, type="l", col="black",
+         main=paste0(loja_nome, " ", cfg_nome, " — Growing Window"), # ← cfg_nome adicionado
+         ylab="Num_Customers", xlab="Observações de teste acumuladas")
+    lines(all_MLPE, col="red", lty=2)
+    legend("topright", c("Real","MLPE"), col=c("black","red"), lty=c(1,2))
 
-  plot(all_Y, type="l", col="black",
-       main=paste0(loja_nome, " Multi MLPE — Growing Window (", runs, " iterações)"),
-       ylab="Num_Customers", xlab="Observações de teste acumuladas")
-  lines(all_MLPE, col="red", lty=2)
-  legend("topright", c("Real","MLPE"), col=c("black","red"), lty=c(1,2))
-
-  return(list(
-    ev_mlpe_nmae=ev_mlpe_nmae, ev_mlpe_rmse=ev_mlpe_rmse,
-    ev_sn_nmae=ev_sn_nmae,     ev_sn_rmse=ev_sn_rmse,
-    scores=scores, melhor=melhor
-  ))
+    resultados_config[[cfg_nome]] <- list(                         # ← novo — guarda por config
+      ev_mlpe_nmae=ev_mlpe_nmae, ev_mlpe_rmse=ev_mlpe_rmse,
+      ev_sn_nmae=ev_sn_nmae,     ev_sn_rmse=ev_sn_rmse,
+      med_mlpe_nmae=med_mlpe_nmae, med_mlpe_rmse=med_mlpe_rmse,
+      med_sn_nmae=med_sn_nmae,     med_sn_rmse=med_sn_rmse,
+      scores=scores, melhor=melhor
+    )
+  }                                                                # ← fecho do loop
+  return(resultados_config)                                        # ← alterado
 }
 
-bt_multi_balt <- backtesting_multi(baltimore_multi,    "Baltimore")
-bt_multi_lanc <- backtesting_multi(lancaster_multi,    "Lancaster")
-bt_multi_phil <- backtesting_multi(philadelphia_multi, "Philadelphia")
-bt_multi_rich <- backtesting_multi(richmond_multi,     "Richmond")
+bt_multi_balt <- backtesting_multi_configs(baltimore_multi,    "Baltimore")   # ← nome alterado
+bt_multi_lanc <- backtesting_multi_configs(lancaster_multi,    "Lancaster")
+bt_multi_phil <- backtesting_multi_configs(philadelphia_multi, "Philadelphia")
+bt_multi_rich <- backtesting_multi_configs(richmond_multi,     "Richmond")
 ```
 
 
 ```{r}
 # ── Gráfico NMAE + RMSE por iteração — Multivariado ────────────────────────
 plot_metricas_multi <- function(bt_result, loja_nome) {
-  runs  <- length(bt_result$ev_mlpe_nmae)
-  iters <- 1:runs
 
-  par(mfrow=c(1,2))
+  for (cfg_nome in names(bt_result)) {                            # ← novo loop pelas configs
+    r     <- bt_result[[cfg_nome]]                               # ← novo
+    runs  <- length(r$ev_mlpe_nmae)                              # ← era bt_result$ev_mlpe_nmae
+    iters <- 1:runs
 
-  # NMAE
-  ylim_nmae <- range(c(bt_result$ev_mlpe_nmae, bt_result$ev_sn_nmae))
-  plot(iters, bt_result$ev_mlpe_nmae, type="b", col="red", pch=19, lty=1,
-       ylim=ylim_nmae, main=paste0(loja_nome, " Multi — NMAE por iteração"),
-       xlab="Iteração", ylab="NMAE (%)")
-  lines(iters, bt_result$ev_sn_nmae, type="b", col="black", pch=15, lty=2)
-  abline(h=median(bt_result$ev_mlpe_nmae), col="red",   lty=2, lwd=1.5)
-  abline(h=median(bt_result$ev_sn_nmae),   col="black", lty=2, lwd=1.5)
-  legend("topright",
-         c(paste0("MLPE (med=", round(median(bt_result$ev_mlpe_nmae),1), "%)"),
-           paste0("SN (med=",   round(median(bt_result$ev_sn_nmae),1),   "%)")),
-         col=c("red","black"), lty=c(1,2), pch=c(19,15))
+    par(mfrow=c(1,2))
 
-  # RMSE
-  ylim_rmse <- range(c(bt_result$ev_mlpe_rmse, bt_result$ev_sn_rmse))
-  plot(iters, bt_result$ev_mlpe_rmse, type="b", col="red", pch=19, lty=1,
-       ylim=ylim_rmse, main=paste0(loja_nome, " Multi — RMSE por iteração"),
-       xlab="Iteração", ylab="RMSE")
-  lines(iters, bt_result$ev_sn_rmse, type="b", col="black", pch=15, lty=2)
-  abline(h=median(bt_result$ev_mlpe_rmse), col="red",   lty=2, lwd=1.5)
-  abline(h=median(bt_result$ev_sn_rmse),   col="black", lty=2, lwd=1.5)
-  legend("topright",
-         c(paste0("MLPE (med=", round(median(bt_result$ev_mlpe_rmse),1), ")"),
-           paste0("SN (med=",   round(median(bt_result$ev_sn_rmse),1),   ")")),
-         col=c("red","black"), lty=c(1,2), pch=c(19,15))
+    # NMAE
+    ylim_nmae <- range(c(r$ev_mlpe_nmae, r$ev_sn_nmae))
+    plot(iters, r$ev_mlpe_nmae, type="b", col="red", pch=19, lty=1,
+         ylim=ylim_nmae,
+         main=paste0(loja_nome, " ", cfg_nome, " — NMAE por iteração"), # ← cfg_nome adicionado
+         xlab="Iteração", ylab="NMAE (%)")
+    lines(iters, r$ev_sn_nmae, type="b", col="black", pch=15, lty=2)
+    abline(h=median(r$ev_mlpe_nmae), col="red",   lty=2, lwd=1.5)
+    abline(h=median(r$ev_sn_nmae),   col="black", lty=2, lwd=1.5)
+    legend("topright",
+           c(paste0("MLPE (med=", round(median(r$ev_mlpe_nmae),1), "%)"),
+             paste0("SN (med=",   round(median(r$ev_sn_nmae),1),   "%)")),
+           col=c("red","black"), lty=c(1,2), pch=c(19,15))
 
-  par(mfrow=c(1,1))
+    # RMSE
+    ylim_rmse <- range(c(r$ev_mlpe_rmse, r$ev_sn_rmse))
+    plot(iters, r$ev_mlpe_rmse, type="b", col="red", pch=19, lty=1,
+         ylim=ylim_rmse,
+         main=paste0(loja_nome, " ", cfg_nome, " — RMSE por iteração"), # ← cfg_nome adicionado
+         xlab="Iteração", ylab="RMSE")
+    lines(iters, r$ev_sn_rmse, type="b", col="black", pch=15, lty=2)
+    abline(h=median(r$ev_mlpe_rmse), col="red",   lty=2, lwd=1.5)
+    abline(h=median(r$ev_sn_rmse),   col="black", lty=2, lwd=1.5)
+    legend("topright",
+           c(paste0("MLPE (med=", round(median(r$ev_mlpe_rmse),1), ")"),
+             paste0("SN (med=",   round(median(r$ev_sn_rmse),1),   ")")),
+           col=c("red","black"), lty=c(1,2), pch=c(19,15))
+
+    par(mfrow=c(1,1))
+  }                                                               # ← fecho do loop
 }
 
-plot_metricas_multi(bt_multi_balt,  "Baltimore")
-plot_metricas_multi(bt_multi_lanc,  "Lancaster")
-plot_metricas_multi(bt_multi_phil,  "Philadelphia")
-plot_metricas_multi(bt_multi_rich,  "Richmond")
+plot_metricas_multi(bt_multi_balt, "Baltimore")
+plot_metricas_multi(bt_multi_lanc, "Lancaster")
+plot_metricas_multi(bt_multi_phil, "Philadelphia")
+plot_metricas_multi(bt_multi_rich, "Richmond")
 ```
 
 ```{r}
 # ── Tabela resumo multivariado ──────────────────────────────────────────────
-resultados_multi <- data.frame(
-  Loja       = c("Baltimore","Lancaster","Philadelphia","Richmond"),
-  MLPE_NMAE  = c(median(bt_multi_balt$ev_mlpe_nmae), median(bt_multi_lanc$ev_mlpe_nmae),
-                 median(bt_multi_phil$ev_mlpe_nmae), median(bt_multi_rich$ev_mlpe_nmae)),
-  MLPE_RMSE  = c(median(bt_multi_balt$ev_mlpe_rmse), median(bt_multi_lanc$ev_mlpe_rmse),
-                 median(bt_multi_phil$ev_mlpe_rmse), median(bt_multi_rich$ev_mlpe_rmse)),
-  SN_NMAE    = c(median(bt_multi_balt$ev_sn_nmae),   median(bt_multi_lanc$ev_sn_nmae),
-                 median(bt_multi_phil$ev_sn_nmae),   median(bt_multi_rich$ev_sn_nmae)),
-  SN_RMSE    = c(median(bt_multi_balt$ev_sn_rmse),   median(bt_multi_lanc$ev_sn_rmse),
-                 median(bt_multi_phil$ev_sn_rmse),   median(bt_multi_rich$ev_sn_rmse)),
-  Melhor     = c(bt_multi_balt$melhor, bt_multi_lanc$melhor,
-                 bt_multi_phil$melhor, bt_multi_rich$melhor)
-)
-resultados_multi$Melhoria_pct <- round(
-  (resultados_multi$SN_NMAE - resultados_multi$MLPE_NMAE) /
-   resultados_multi$SN_NMAE * 100, 1)
+build_tabela_multi <- function(bt_list, loja_nome) {             # ← nova função
+  rows <- lapply(names(bt_list), function(cfg) {
+    r <- bt_list[[cfg]]
+    data.frame(
+      Loja         = loja_nome,
+      Config       = cfg,
+      MLPE_NMAE    = round(r$med_mlpe_nmae, 2),
+      MLPE_RMSE    = round(r$med_mlpe_rmse, 2),
+      SN_NMAE      = round(r$med_sn_nmae,   2),
+      SN_RMSE      = round(r$med_sn_rmse,   2),
+      Melhor       = r$melhor,
+      Melhoria_pct = round(
+        (r$med_sn_nmae - r$med_mlpe_nmae) / r$med_sn_nmae * 100, 1)
+    )
+  })
+  do.call(rbind, rows)
+}
 
-print(resultados_multi)
+# ← em vez de construir manualmente com median(bt_multi_balt$ev_mlpe_nmae)
+tabela_multi <- rbind(
+  build_tabela_multi(bt_multi_balt, "Baltimore"),
+  build_tabela_multi(bt_multi_lanc, "Lancaster"),
+  build_tabela_multi(bt_multi_phil, "Philadelphia"),
+  build_tabela_multi(bt_multi_rich, "Richmond")
+)
+print(tabela_multi)
 ```
 
+```{r}
+get_melhor_multi <- function(bt_multi) {
+  scores_por_config <- sapply(names(bt_multi), function(cfg) {
+    bt_multi[[cfg]]$scores["MLPE"]
+  })
+  melhor_cfg <- names(which.min(scores_por_config))
+  exo_cols   <- MULTI_CONFIGS[[melhor_cfg]]
+  cat("Melhor config:", melhor_cfg, "\n")
+  return(list(cfg=melhor_cfg, exo_cols=exo_cols))
+}
+
+previsao_final_multi <- function(df_multi, loja_nome, exo_cols, npred=NPRED,
+                                  datas_futuras=NULL) {
+  mtr_end <- prepare_endogenous(df_multi)
+  N       <- nrow(mtr_end)
+  exogen  <- prepare_exogenous_config(df_multi, N, exo_cols)
+
+  MNN  <- mfit(mtr_end, "mlpe", VINP, exogen=exogen)
+  Pred <- lforecastm(MNN, h=npred, exogen=if (!is.null(exogen)) tail(exogen, npred) else NULL)
+  P_final <- postprocess_predictions(Pred[[1]], datas_futuras)
+
+  cat("\n===", loja_nome, "Multi — Previsão próximos 7 dias ===\n")
+  for (i in 1:npred) {
+    data_str <- if (!is.null(datas_futuras)) paste0(" (", format(as.Date(datas_futuras)[i], "%Y-%m-%d"), ")") else ""
+    cat("Dia +", i, data_str, ":", P_final[i], "clientes\n")
+  }
+  return(P_final)
+}
+
+melhor_multi_balt <- get_melhor_multi(bt_multi_balt)
+melhor_multi_lanc <- get_melhor_multi(bt_multi_lanc)
+melhor_multi_phil <- get_melhor_multi(bt_multi_phil)
+melhor_multi_rich <- get_melhor_multi(bt_multi_rich)
+
+prev_multi_balt <- previsao_final_multi(baltimore_multi, "Baltimore",
+                                         exo_cols=melhor_multi_balt$exo_cols,
+                                         datas_futuras=datas_futuras)
+prev_multi_lanc <- previsao_final_multi(lancaster_multi, "Lancaster",
+                                         exo_cols=melhor_multi_lanc$exo_cols,
+                                         datas_futuras=datas_futuras)
+prev_multi_phil <- previsao_final_multi(philadelphia_multi, "Philadelphia",
+                                         exo_cols=melhor_multi_phil$exo_cols,
+                                         datas_futuras=datas_futuras)
+prev_multi_rich <- previsao_final_multi(richmond_multi, "Richmond",
+                                         exo_cols=melhor_multi_rich$exo_cols,
+                                         datas_futuras=datas_futuras)
+```
