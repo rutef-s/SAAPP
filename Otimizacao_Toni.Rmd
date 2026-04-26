@@ -1,0 +1,269 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+# ═══════════════════════════════════════════════════════════════════════════
+# OPTIMIZAÇÃO — O1: Maximizar lucro semanal 
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── Parâmetros do modelo de negócio ─────────────────────────────────────────
+STORE_PARAMS <- list(
+  baltimore    = list(FJ=1.00, FX=1.15, W=700),
+  lancaster    = list(FJ=1.05, FX=1.20, W=730),
+  philadelphia = list(FJ=1.10, FX=1.15, W=760),
+  richmond     = list(FJ=1.15, FX=1.25, W=800)
+)
+
+# Custos HR por worker por dia
+HR_COST <- list(
+  X_weekday = 80,
+  X_weekend = 95,
+  J_weekday = 60,
+  J_weekend = 70
+)
+
+# Custos fixos semanais por loja
+STORE_FIXED_COST <- list(
+  baltimore    = 700,
+  lancaster    = 730,   
+  philadelphia = 760,
+  richmond     = 800    
+)
+
+CAP_X      <- 7
+CAP_J      <- 6
+IS_WEEKEND <- c(TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FUNÇÃO DE AVALIAÇÃO — eval_s1
+# s = c(J_1..J_7, X_1..X_7, PR_1..PR_7) — vector de 21 valores
+# pred = vector de 7 valores (Num_Customers previstos para cada dia)
+# store = nome da loja (para buscar W_s)
+# ═══════════════════════════════════════════════════════════════════════════
+eval_s1 <- function(s, pred, store = "baltimore") {
+
+  params <- STORE_PARAMS[[store]]
+  FJ     <- params$FJ
+  FX     <- params$FX
+  W_s    <- params$W
+
+  J  <- round(s[1:7])
+  X  <- round(s[8:14])
+  PR <- pmax(0, pmin(0.30, s[15:21]))
+
+  weekly_return <- 0
+
+  for (d in 1:7) {
+    C_d  <- pred[d]
+    X_d  <- X[d]
+    J_d  <- J[d]
+    PR_d <- PR[d]
+
+    by_X <- min(X_d * CAP_X, C_d)
+    by_J <- min(J_d * CAP_J, max(0, C_d - by_X))
+
+    log_term <- log(2 - PR_d)
+    U_X      <- round(FX * 10 / log_term)
+    U_J      <- round(FJ * 10 / log_term)
+
+    Xunits <- by_X * U_X
+    Junits <- by_J * U_J
+
+    Xsales <- round(Xunits * (1 - PR_d) * 1.07)
+    Jsales <- round(Junits * (1 - PR_d) * 1.07)
+
+    if (IS_WEEKEND[d]) {
+      XHRc <- X_d * HR_COST$X_weekend
+      JHRc <- J_d * HR_COST$J_weekend
+    } else {
+      XHRc <- X_d * HR_COST$X_weekday
+      JHRc <- J_d * HR_COST$J_weekday
+    }
+
+    R_d           <- Xsales + Jsales - XHRc - JHRc
+    weekly_return <- weekly_return + R_d
+  }
+
+  Rs <- weekly_return - W_s
+  return(Rs)
+}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# VERIFICAÇÃO — reproduzir o exemplo do slide (Baltimore → lucro = 146)
+# ═══════════════════════════════════════════════════════════════════════════
+verify_eval <- function() {
+  cat("═══════════════════════════════════════════\n")
+  cat("VERIFICAÇÃO DA FUNÇÃO eval_s1\n")
+  cat("═══════════════════════════════════════════\n\n")
+
+  # Dados reais da semana de exemplo (slide imagem 2)
+  pred_verify <- c(97, 61, 65, 71, 65, 89, 125)  # Num_Customers reais
+
+  # Plano do slide (PR, X, J por dia su→sa)
+  J_verify  <- c(0,  10, 4, 0,  5, 5, 4)
+  X_verify  <- c(4,  0,  8, 20, 0, 4, 3)
+  PR_verify <- c(0.00, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30)
+
+  s_verify <- c(J_verify, X_verify, PR_verify)
+
+  # Cálculo detalhado para debug
+  cat("Dia | Clientes | by_X | by_J | Xunits | Junits | Xsales | Jsales | XHRc | JHRc | R_d\n")
+  cat(paste(rep("-", 100), collapse=""), "\n")
+
+  for (d in 1:7) {
+    day_names <- c("su","mo","tu","we","th","fr","sa")
+    C_d  <- pred_verify[d]
+    X_d  <- X_verify[d]
+    J_d  <- J_verify[d]
+    PR_d <- PR_verify[d]
+
+    by_X <- min(X_d * CAP_X, C_d)
+    by_J <- min(J_d * CAP_J, max(0, C_d - by_X))
+
+    log_term <- log(2 - PR_d)
+    U_X      <- round(FX * 10 / log_term)
+    U_J      <- round(FJ * 10 / log_term)
+
+    Xunits <- by_X * U_X
+    Junits <- by_J * U_J
+
+    Xsales <- round(Xunits * (1 - PR_d) * 1.07)
+    Jsales <- round(Junits * (1 - PR_d) * 1.07)
+
+    if (IS_WEEKEND[d]) {
+      XHRc <- X_d * HR_COST$X_weekend
+      JHRc <- J_d * HR_COST$J_weekend
+    } else {
+      XHRc <- X_d * HR_COST$X_weekday
+      JHRc <- J_d * HR_COST$J_weekday
+    }
+
+    R_d <- Xsales + Jsales - XHRc - JHRc
+
+    cat(sprintf(" %s  | %8d | %4d | %4d | %6d | %6d | %6d | %6d | %4d | %4d | %4d\n",
+                day_names[d], C_d, by_X, by_J,
+                Xunits, Junits, Xsales, Jsales, XHRc, JHRc, R_d))
+  }
+
+  result     <- eval_s1(s_verify, pred_verify, store="baltimore")
+  expected   <- 146
+
+  cat(paste(rep("-", 100), collapse=""), "\n")
+  cat(sprintf("\nLucro semanal calculado : %d\n", result))
+  cat(sprintf("Lucro esperado (slide)  : %d\n", expected))
+
+  if (result == expected) {
+    cat("✓ VERIFICAÇÃO PASSOU — eval_s1 está correctamente implementada!\n")
+  } else {
+    cat(sprintf("✗ VERIFICAÇÃO FALHOU — diferença de %d\n", result - expected))
+  }
+  cat("═══════════════════════════════════════════\n")
+}
+
+verify_eval()
+```
+
+
+```{r}
+# ═══════════════════════════════════════════════════════════════════════════
+# MONTE CARLO — O1: Maximizar lucro semanal (Baltimore, n=1000)
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Previsões para a próxima semana (vêm do modelo de forecasting)
+# Substitui pelos valores reais do prev_arimax_balt ou prev_balt
+
+pred_balt <- c(102,87,83,88,94,89,92)   # 7 valores previstos
+
+# ── Bounds da solução ────────────────────────────────────────────────────────
+# s = c(J_1..J_7, X_1..X_7, PR_1..PR_7)
+lower_balt <- rep(0, 21)
+upper_balt <- c(
+  ceiling(pred_balt / CAP_J),   # máx J workers por dia
+  ceiling(pred_balt / CAP_X),   # máx X workers por dia
+  rep(0.30, 7)                  # máx PR por dia
+)
+
+cat("\n═══════════════════════════════════════════\n")
+cat("OPTIMIZAÇÃO O1 — Baltimore\n")
+cat("Previsões próximos 7 dias:", pred_balt, "\n")
+cat("Lower bounds:", lower_balt, "\n")
+cat("Upper bounds:", round(upper_balt, 2), "\n")
+cat("═══════════════════════════════════════════\n\n")
+
+# ── Monte Carlo — n=1000 soluções aleatórias ─────────────────────────────────
+set.seed(42)
+N_MC <- 1000
+
+best_profit <- -Inf
+best_s      <- NULL
+
+profits_mc  <- numeric(N_MC)
+
+for (i in 1:N_MC) {
+  # Gerar solução aleatória dentro dos bounds
+  s_rand <- numeric(21)
+
+  # J e X: inteiros aleatórios
+  for (k in 1:14) {
+    s_rand[k] <- sample(lower_balt[k]:upper_balt[k], 1)
+  }
+
+  # PR: valores reais aleatórios [0, 0.30]
+  s_rand[15:21] <- runif(7, min=0, max=0.30)
+
+  # Avaliar
+  profit       <- eval_s1(s_rand, pred_balt, store="baltimore")
+  profits_mc[i] <- profit
+
+  # Guardar melhor
+  if (profit > best_profit) {
+    best_profit <- profit
+    best_s      <- s_rand
+  }
+}
+```
+
+
+```{r}
+# ── Resultados ───────────────────────────────────────────────────────────────
+cat("── Resultados Monte Carlo O1 (n=1000) ──\n")
+cat("Melhor lucro encontrado :", round(best_profit, 2), "$\n")
+cat("Mediana dos lucros      :", round(median(profits_mc), 2), "$\n")
+cat("Média dos lucros        :", round(mean(profits_mc), 2), "$\n")
+cat("Lucro mínimo            :", round(min(profits_mc), 2), "$\n\n")
+
+# ── Melhor plano encontrado ──────────────────────────────────────────────────
+best_J  <- round(best_s[1:7])
+best_X  <- round(best_s[8:14])
+best_PR <- round(best_s[15:21], 2)
+
+day_names <- c("su","mo","tu","we","th","fr","sa")
+
+cat("── Melhor plano semanal ──\n")
+cat(sprintf("%-6s", "day:"),  paste(sprintf("%6s", day_names),  collapse=""), "\n")
+cat(sprintf("%-6s", "PR:"),   paste(sprintf("%6.2f", best_PR),  collapse=""), "\n")
+cat(sprintf("%-6s", "HR X:"), paste(sprintf("%6d", best_X),     collapse=""), "\n")
+cat(sprintf("%-6s", "HR J:"), paste(sprintf("%6d", best_J),     collapse=""), "\n")
+cat(sprintf("week profit = %d\n", best_profit))
+
+# ── Histograma da distribuição dos lucros ────────────────────────────────────
+hist(profits_mc,
+     breaks = 50,
+     main   = "Baltimore — Distribuição dos lucros (Monte Carlo O1, n=1000)",
+     xlab   = "Lucro semanal ($)",
+     ylab   = "Frequência",
+     col    = "steelblue",
+     border = "white")
+abline(v = best_profit, col = "red",    lty = 2, lwd = 2)
+abline(v = median(profits_mc), col = "orange", lty = 2, lwd = 2)
+legend("topright",
+       c(paste0("Melhor=", round(best_profit)),
+         paste0("Mediana=", round(median(profits_mc)))),
+       col = c("red","orange"), lty = 2, lwd = 2)
+```
+
+
