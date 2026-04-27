@@ -25,7 +25,7 @@ richmond_uni <- readRDS("data_clean/richmond_uni.rds")
 ```
 
 ```{r}
-# Crate lists of dataframes for each type of problem (Multivariate and Univariate)
+# Crate lists of dataframes for each type of problem (Univariate)
 datasets_uni <- list(baltimore_uni = baltimore_uni,
                      lancaster_uni = lancaster_uni,
                      philadelphia_uni = philadelphia_uni,
