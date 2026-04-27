@@ -1,0 +1,292 @@
+---
+title: "LSTM"
+output: html_document
+date: "2026-04-25"
+---
+
+```{r}
+# Libraries
+library(rminer)
+library(xgboost)
+library(ggplot2)
+library(tidyverse)
+library(dplyr)
+```
+
+```{r}
+# Get Date
+baltimore_multi <- readRDS("data_clean/baltimore_multi.rds")
+
+lancaster_multi <- readRDS("data_clean/lancaster_multi.rds")
+
+philadelphia_multi <- readRDS("data_clean/philadelphia_multi.rds")
+
+richmond_multi <- readRDS("data_clean/richmond_multi.rds")
+```
+
+```{r}
+# Crate lists of dataframes for each type of problem (Multivariate)
+datasets_uni <- list(baltimore_multi = baltimore_multi,
+                     lancaster_multi = lancaster_multi,
+                     philadelphia_multi = philadelphia_multi,
+                     richmond_multi = richmond_multi
+                     )
+
+```
+
+```{r}
+run.xgboost <- function(df, horizon = 7, iter = 20, city_name, params) {
+  cat("---- Start Training for XGBoost: ", city_name, "----\n")
+  importance_list <- list()
+  models_list <- list()
+  
+  N <- nrow(df)
+  window <- N - (iter * horizon) - horizon
+
+  predictions <- list()
+
+  all_nmae <- matrix(NA, nrow = iter, ncol = horizon)
+  all_rmse <- matrix(NA, nrow = iter, ncol = horizon)
+
+  for (i in 1:iter) {
+    cat("\nIter:", i, "\n")
+    index <- holdout(
+      1:N,
+      ratio = horizon,
+      iter = i,
+      mode = "incremental",
+      increment = horizon,
+      window = window
+    )
+
+    train_idx <- index$tr
+
+    train <- df[train_idx, ]
+
+    X_train <- as.matrix(train[, !(names(train) %in% c("Date", "Num_Customers")), drop = FALSE])
+    y_train <- train$Num_Customers
+
+    d_train <- xgboost::xgb.DMatrix(data = X_train, label = y_train)
+
+    xgb_model <- xgboost::xgb.train(
+      params = params,
+      data = d_train,
+      nrounds = 1000
+    )
+
+    models_list[[i]] <- xgb_model
+
+    importance <- xgboost::xgb.importance(model = xgb_model)
+    importance$iter <- i
+    importance_list[[i]] <- importance
+
+    for (h in 1:horizon) {
+      cat("\nHorizon:", h, "\n")
+      test_idx  <- index$ts[h]
+      test  <- df[test_idx, ]
+
+      x_test  <- as.matrix(test[, !(names(test) %in% c("Date", "Num_Customers")), drop = FALSE])
+      y_test  <- test$Num_Customers
+
+      d_test <- xgboost::xgb.DMatrix(data = x_test, label = y_test)
+      pred <- as.numeric(predict(xgb_model, d_test))
+
+      predictions[[length(predictions) + 1]] <- data.frame(
+        city = city_name,
+        iter = i,
+        horizon = h,
+        date = test$Date,
+        actual = y_test,
+        predicted = pred,
+        error = y_test - pred
+      )
+
+      mae  <- abs(y_test - pred)
+      nmae <- mae / mean(y_train)
+      rmse <- (y_test - pred)^2
+
+      all_nmae[i, h] <- nmae
+      all_rmse[i, h] <- rmse
+    }
+  }
+
+  predictions_df <- do.call(rbind, predictions)
+
+  nmae_per_horizon <- colMeans(all_nmae)
+  rmse_per_horizon <- sqrt(colMeans(all_rmse))
+
+  importance_df <- do.call(rbind, Filter(Negate(is.null), importance_list))
+
+  importance_mean <- aggregate(Gain ~ Feature, data = importance_df, mean)
+  names(importance_mean)[2] <- "Gain_mean"
+
+  importance_sd <- aggregate(Gain ~ Feature, data = importance_df, sd)
+  names(importance_sd)[2] <- "Gain_sd"
+  
+  importance_freq <- aggregate(Gain ~ Feature, data = importance_df, length)
+  names(importance_freq)[2] <- "Frequency"
+
+  importance_summary <- Reduce(function(x, y) merge(x, y, by = "Feature"),
+                               list(importance_mean, importance_sd, importance_freq))
+
+  importance_summary <- importance_summary[order(-importance_summary$Gain_mean), ]
+
+  cat("\n---- XGBoost Completed:", city_name, "----\n")
+
+  return(list(
+    metrics = list(
+      NMAE = nmae_per_horizon,
+      RMSE = rmse_per_horizon
+    ),
+    predictions = predictions_df,
+    importance = importance_df,
+    importance_summary = importance_summary,
+    models = models_list
+  ))
+}
+```
+
+```{r}
+# Start with the Univariate Problem
+out <- list()
+
+params <- list(
+    objective = "reg:squarederror",
+    max_depth = 6,
+    eta = 0.05,
+    subsample = 0.8,
+    colsample_bytree = 0.7,
+    min_child_weight = 5,
+    gamma = 0.1,
+    lambda = 1,
+    alpha = 0.5,
+    early_stopping_rounds = 50
+  )
+
+for (city_name in names(datasets_uni)) {
+  df <- datasets_uni[[city_name]]
+
+  out[[city_name]] <- run.xgboost(
+    df = df,
+    horizon = 7,
+    iter = 20,
+    city_name = city_name,
+    params = params
+  )
+}
+
+all_predictions <- do.call(rbind, lapply(out, function(x) x$predictions))
+```
+
+```{r}
+compute_weighted_score <- function(df, w_nmae = 0.4, w_rmse = 0.6) {
+  df %>%
+    group_by(horizon) %>%
+    mutate(
+      NMAE_norm = ifelse(max(NMAE) == min(NMAE), 0,
+                         (NMAE - min(NMAE)) / (max(NMAE) - min(NMAE))),
+
+      RMSE_norm = ifelse(max(RMSE) == min(RMSE), 0,
+                         (RMSE - min(RMSE)) / (max(RMSE) - min(RMSE)))
+    ) %>%
+    ungroup() %>%
+    mutate(
+      score = w_nmae * NMAE_norm + w_rmse * RMSE_norm
+    )
+}
+```
+
+```{r, fig.width=18, fig.height=8}
+# Actual vs Predicted
+for (city_name in unique(all_predictions$city)) {
+  df_city <- subset(all_predictions, city == city_name)
+  
+  df_long <- df_city %>%
+    pivot_longer(cols = c(actual, predicted),
+                 names_to = "type",
+                 values_to = "Value")
+
+  print(ggplot(df_long, aes(x = date, y = Value, color = type)) +
+    geom_line() +
+    facet_wrap(~ horizon, scales = "free_y") +
+    ggtitle(paste("City:", city_name)) +
+    theme_minimal()
+  )
+}
+```
+
+```{r, fig.width=18, fig.height=8}
+# Error Over Time
+for (city_name in names(out)) {
+  df_city <- out[[city_name]]$predictions
+  
+  print(ggplot(df_city, aes(x = date, y = error)) +
+    geom_line(color = "red") +
+    facet_wrap(~ horizon, scales = "free_y") +
+    ggtitle("City:", city_name) +
+    theme_minimal()
+  )
+}
+```
+
+```{r, fig.width=18, fig.height=8}
+# NMAE per Horizon
+for (city_name in names(out)) {
+  df_metrics <- data.frame(
+    horizon = 1:7,
+    NMAE = out[[city_name]]$metrics$NMAE
+  )
+
+  print(ggplot(df_metrics, aes(x = horizon, y = NMAE)) +
+          geom_line(color = "red") + geom_point() +
+          theme_minimal() +
+          ggtitle("City:", city_name)
+  )
+}
+```
+
+The figure shows the NMAE evolution across different forecast horizons for each city using a multivariate approach.
+
+Overall, the model performs best at intermediate horizons (h=3 to h=5), where the lowest errors are observed. This suggests that the model captures short-term temporal dynamics effectively while still maintaining stability in the medium term.
+
+At shorter horizons (h=1–2), the error is slightly higher, indicating sensitivity to recent fluctuations. At longer horizons (especially h=7), the error increases, which is expected due to the accumulation of uncertainty over time.
+
+Despite some variability across cities, the model remains consistent, with most NMAE values within a good performance range (~0.07–0.18), indicating solid predictive capability.
+
+```{r, fig.width=18, fig.height=8}
+# RMSE per Horizon
+for (city_name in names(out)) {
+  df_metrics <- data.frame(
+    horizon = 1:7,
+    RMSE = out[[city_name]]$metrics$RMSE
+  )
+
+  print(ggplot(df_metrics, aes(x = horizon, y = RMSE)) +
+          geom_line(color = "red") + geom_point() +
+          theme_minimal() +
+          ggtitle("City:", city_name)
+  )
+}
+```
+
+The RMSE generally decreases from short horizons to intermediate horizons (around h=3–5), where the lowest errors are observed. This indicates that the model achieves its best performance in the short-to-medium term.
+
+For longer horizons, particularly at h=7, the RMSE increases significantly, reflecting the expected accumulation of uncertainty in multi-step forecasting. Some variability is observed at lower horizons, suggesting sensitivity to short-term fluctuations.
+
+Overall, the model demonstrates stable and reliable performance in intermediate horizons, with predictable degradation as the forecast horizon increases.
+
+```{r, fig.width=18, fig.height=8}
+# Feature Importance
+for (city_name in names(out)) {
+  top_features <- head(out[[city_name]]$importance_summary, 10)
+  
+  print(ggplot(top_features, aes(x = reorder(Feature, Gain_mean), y = Gain_mean)) +
+    geom_col() +
+    coord_flip() +
+    ggtitle("City:", city_name) +
+    theme_minimal()
+  )
+}
+```
+
+
