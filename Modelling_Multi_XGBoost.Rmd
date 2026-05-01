@@ -31,7 +31,6 @@ datasets_uni <- list(baltimore_multi = baltimore_multi,
                      philadelphia_multi = philadelphia_multi,
                      richmond_multi = richmond_multi
                      )
-
 ```
 
 ```{r}
@@ -39,6 +38,7 @@ run.xgboost <- function(df, horizon = 7, iter = 20, city_name, params) {
   cat("---- Start Training for XGBoost: ", city_name, "----\n")
   importance_list <- list()
   models_list <- list()
+  metrics_list <- list()
   
   N <- nrow(df)
   window <- N - (iter * horizon) - horizon
@@ -93,7 +93,7 @@ run.xgboost <- function(df, horizon = 7, iter = 20, city_name, params) {
 
       predictions[[length(predictions) + 1]] <- data.frame(
         city = city_name,
-        iter = i,
+        iteration = i,
         horizon = h,
         date = test$Date,
         actual = y_test,
@@ -108,12 +108,19 @@ run.xgboost <- function(df, horizon = 7, iter = 20, city_name, params) {
       all_nmae[i, h] <- nmae
       all_rmse[i, h] <- rmse
     }
+
+    metrics_list[[i]] <- data.frame(
+    city = city_name,
+    iteration = i,
+    horizon = 1:horizon,
+    NMAE = all_nmae[i, ],
+    RMSE = sqrt(all_rmse[i, ])
+    )
   }
+  
+  metrics_df <- do.call(rbind, metrics_list)
 
   predictions_df <- do.call(rbind, predictions)
-
-  nmae_per_horizon <- colMeans(all_nmae)
-  rmse_per_horizon <- sqrt(colMeans(all_rmse))
 
   importance_df <- do.call(rbind, Filter(Negate(is.null), importance_list))
 
@@ -134,10 +141,7 @@ run.xgboost <- function(df, horizon = 7, iter = 20, city_name, params) {
   cat("\n---- XGBoost Completed:", city_name, "----\n")
 
   return(list(
-    metrics = list(
-      NMAE = nmae_per_horizon,
-      RMSE = rmse_per_horizon
-    ),
+    metrics = metrics_df,
     predictions = predictions_df,
     importance = importance_df,
     importance_summary = importance_summary,
@@ -287,6 +291,53 @@ for (city_name in names(out)) {
     theme_minimal()
   )
 }
+```
+
+```{r}
+# Post Process Function
+post_process_forecast <- function(df) {
+  
+  df %>%
+    mutate(
+      # Non Negative Values
+      predicted = pmax(predicted, 0),
+      
+      # Round the values to integer
+      predicted = round(predicted),
+      
+      # Busisnesss Rule (December 25 = 0)
+      predicted = ifelse(
+        format(date, "%m-%d") == "12-25",
+        0,
+        predicted
+      )
+    )
+}
+```
+
+
+```{r}
+# Get the best Results for each Horizon in each city
+metrics <- do.call(rbind, lapply(out, function(x) x$metrics))
+
+best_iters <- metrics %>%
+  group_by(city, horizon) %>%
+  slice_min(NMAE, with_ties = FALSE) %>%
+  select(city, horizon, iteration)
+
+best_predictions <- best_iters %>%
+  left_join(all_predictions, 
+            by = c("city", "iteration", "horizon")) %>%
+  select(city, horizon, predicted, date)
+
+final_forecast <- best_predictions %>%
+  arrange(city, horizon) %>%
+  post_process_forecast()
+```
+
+```{r}
+# Save Final Forecast data for optimization
+saveRDS(final_forecast, "optimization_data/forecasting.rds")
 ```
 
 
