@@ -1,0 +1,17 @@
+---
+title: "Optimization_Diogo"
+output: html_document
+date: "2026-04-27"
+---
+
+# Optimziation
+
+```{r}
+library(rminer)
+```
+
+```{r}
+# Get Data
+forecast_data <- readRDS("optimization_data/forecasting.rds")
+```
+
