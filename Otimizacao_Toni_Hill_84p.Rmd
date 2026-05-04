@@ -1,0 +1,796 @@
+
+
+```{r}
+#Representação do plano com 84 parâmetros
+
+
+stores <- c("baltimore", "lancaster", "philadelphia", "richmond")
+S <- length(stores)
+DAYS <- 7
+VARS <- 3  # J, X, PR
+
+# s (len=84) -> list(J=4x7, X=4x7, PR=4x7)
+decode_solution <- function(s, S=4, DAYS=7) {
+  stopifnot(length(s) == S*DAYS*3)
+  n <- S*DAYS
+  
+  J  <- matrix(s[1:n],           nrow=S, ncol=DAYS, byrow=TRUE)
+  X  <- matrix(s[(n+1):(2*n)],   nrow=S, ncol=DAYS, byrow=TRUE)
+  PR <- matrix(s[(2*n+1):(3*n)], nrow=S, ncol=DAYS, byrow=TRUE)
+  
+  list(J=J, X=X, PR=PR)
+}
+
+# list(J,X,PR) -> s (len=84)
+encode_solution <- function(J, X, PR) {
+  c(as.vector(t(J)), as.vector(t(X)), as.vector(t(PR)))
+}
+```
+
+```{r}
+# Parâmetros por loja
+
+# Capacidades
+CAP_X <- 7
+CAP_J <- 6
+
+# Custos RH por dia
+HR_COST <- list(
+  X_weekday = 80, X_weekend = 95,
+  J_weekday = 60, J_weekend = 70
+)
+
+# Weekend: Sunday(1) e Saturday(7)
+IS_WEEKEND <- c(TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE)
+
+# Parâmetros por loja (FJ, FX, custo fixo semanal Ws)
+STORE_PARAMS <- list(
+  baltimore    = list(FJ=1.00, FX=1.15, W=700),
+  lancaster    = list(FJ=1.05, FX=1.20, W=730),
+  philadelphia = list(FJ=1.10, FX=1.15, W=760),
+  richmond     = list(FJ=1.15, FX=1.25, W=800)
+)
+```
+
+
+```{r}
+#Avaliação por loja
+
+eval_store_week <- function(Jd, Xd, PRd, pred7, store_name) {
+  p <- STORE_PARAMS[[store_name]]
+  FJ <- p$FJ; FX <- p$FX; W <- p$W
+  
+  # arredondamentos/limites
+  Jd  <- pmax(0, round(Jd))
+  Xd  <- pmax(0, round(Xd))
+  PRd <- pmax(0, pmin(0.30, PRd))
+  
+  weekly_profit <- 0
+  weekly_units  <- 0
+  weekly_hr     <- 0
+  
+  for (d in 1:7) {
+    C_d <- pred7[d]
+    
+    # clientes assistidos: primeiro X depois J
+    by_X <- min(Xd[d] * CAP_X, C_d)
+    by_J <- min(Jd[d] * CAP_J, max(0, C_d - by_X))
+    
+    # unidades por cliente (depende do F e PR)
+    log_term <- log(2 - PRd[d])
+    U_X <- round(FX * 10 / log_term)
+    U_J <- round(FJ * 10 / log_term)
+    
+    # unidades totais
+    Xunits <- by_X * U_X
+    Junits <- by_J * U_J
+    units_d <- Xunits + Junits
+    
+    # lucro de vendas (profit) por tipo
+    Xsales <- round(Xunits * (1 - PRd[d]) * 1.07)
+    Jsales <- round(Junits * (1 - PRd[d]) * 1.07)
+    
+    # custos RH
+    if (IS_WEEKEND[d]) {
+      XHRc <- Xd[d] * HR_COST$X_weekend
+      JHRc <- Jd[d] * HR_COST$J_weekend
+    } else {
+      XHRc <- Xd[d] * HR_COST$X_weekday
+      JHRc <- Jd[d] * HR_COST$J_weekday
+    }
+    
+    profit_d <- (Xsales + Jsales) - (XHRc + JHRc)
+    
+    weekly_profit <- weekly_profit + profit_d
+    weekly_units  <- weekly_units  + units_d
+    weekly_hr     <- weekly_hr     + (Xd[d] + Jd[d])
+  }
+  
+  # lucro semanal líquido
+  weekly_profit <- weekly_profit - W
+  
+  list(profit=weekly_profit, units=weekly_units, hr=weekly_hr)
+}
+
+```
+
+```{r}
+#avaliação Global - 4 lojas
+
+eval_allstores <- function(s, preds_by_store) {
+  # preds_by_store: named list com 4 vetores (7 dias)
+  dec <- decode_solution(s, S=length(stores), DAYS=7)
+  
+  total_profit <- 0
+  total_units  <- 0
+  total_hr     <- 0
+  
+  for (i in seq_along(stores)) {
+    st <- stores[i]
+    out <- eval_store_week(dec$J[i,], dec$X[i,], dec$PR[i,], preds_by_store[[st]], st)
+    total_profit <- total_profit + out$profit
+    total_units  <- total_units  + out$units
+    total_hr     <- total_hr     + out$hr
+  }
+  
+  c(profit=total_profit, units=total_units, hr=total_hr)
+}
+```
+
+
+
+```{r}
+# O2: constraint hard ≤ 10.000 unidades - Repair determinístico (robusto e simples)
+
+repair_O2 <- function(s, preds_by_store, upper, max_units=10000) {
+  dec <- decode_solution(s, S=length(stores), DAYS=7)
+  
+  # clamp inicial aos bounds
+  s <- pmax(s, 0)
+  s <- pmin(s, upper)
+  dec <- decode_solution(s, S=length(stores), DAYS=7)
+  
+  # função auxiliar para medir units
+  get_units <- function(dec) {
+    s_tmp <- encode_solution(dec$J, dec$X, dec$PR)
+    eval_allstores(s_tmp, preds_by_store)["units"]
+  }
+  
+  units <- get_units(dec)
+  if (units <= max_units) return(s)
+  
+  # 1) reduzir PR gradualmente
+  for (k in 1:20) {
+    dec$PR <- dec$PR * 0.90
+    units <- get_units(dec)
+    if (units <= max_units) {
+      s2 <- encode_solution(dec$J, dec$X, dec$PR)
+      return(pmin(pmax(s2, 0), upper))
+    }
+  }
+  
+  # 2) se PR já baixo, reduzir RH proporcionalmente
+  units <- get_units(dec)
+  if (units > max_units) {
+    ratio <- max_units / units  # < 1
+    dec$J <- pmax(0, round(dec$J * ratio))
+    dec$X <- pmax(0, round(dec$X * ratio))
+  }
+  
+  s2 <- encode_solution(dec$J, dec$X, dec$PR)
+  s2 <- pmin(pmax(s2, 0), upper)
+  
+  # segunda passagem: se ainda violar, repetir ligeiro
+  # (opcional, para segurança)
+  for (k in 1:10) {
+    units2 <- eval_allstores(s2, preds_by_store)["units"]
+    if (units2 <= max_units) break
+    # corta HR adicional
+    dec2 <- decode_solution(s2, S=length(stores), DAYS=7)
+    dec2$J <- pmax(0, dec2$J - 1)
+    dec2$X <- pmax(0, dec2$X - 1)
+    s2 <- pmin(pmax(encode_solution(dec2$J, dec2$X, dec2$PR), 0), upper)
+  }
+  
+  s2
+}
+
+
+```
+
+```{r}
+# O2: constraint hard ≤ 10.000 unidades - Penalização suave
+
+penalty_units <- function(units, max_units=10000, lambda=0.05) {
+  # penalização quadrática a partir do limite
+  excess <- max(0, units - max_units)
+  lambda * excess^2
+}
+
+```
+
+```{r}
+# O3: multiobjetivo via pesos com normalização (profit vs HR) - Normalização prática (via amostragem Monte Carlo rápida)
+
+estimate_norm_constants <- function(preds_by_store, lower, upper, n=200) {
+  set.seed(1)
+  vals <- matrix(NA, nrow=n, ncol=3)
+  colnames(vals) <- c("profit","units","hr")
+  
+  for (i in 1:n) {
+    s <- runif(length(lower), min=lower, max=upper)
+    # arredonda J/X depois no eval; PR fica real
+    v <- eval_allstores(s, preds_by_store)
+    vals[i,] <- v
+  }
+  
+  list(
+    profit_min = min(vals[,"profit"]),
+    profit_max = max(vals[,"profit"]),
+    hr_min     = min(vals[,"hr"]),
+    hr_max     = max(vals[,"hr"])
+  )
+}
+
+norm01 <- function(x, xmin, xmax) {
+  if (xmax == xmin) return(0.5)
+  (x - xmin) / (xmax - xmin)
+}
+
+```
+
+```{r}
+# Função objetivo única para O3 (maximizar)
+
+# w controla importância do lucro vs HR.
+# lucro normalizado sobe (bom), HR normalizado sobe (mau) → entra com sinal negativo.
+# inclui constraint O2 via repair ou penalização.
+
+
+objective_O3 <- function(s, preds_by_store, lower, upper, normC,
+                         w=0.7, use_repair=TRUE,
+                         max_units=10000, lambda=0.05) {
+  
+  s <- pmin(pmax(s, lower), upper)
+  
+  if (use_repair) {
+    s <- repair_O2(s, preds_by_store, upper, max_units=max_units)
+    v <- eval_allstores(s, preds_by_store)
+    # após repair não há penalização (em princípio)
+    pen <- 0
+  } else {
+    v <- eval_allstores(s, preds_by_store)
+    pen <- penalty_units(v["units"], max_units=max_units, lambda=lambda)
+  }
+  
+  profit_n <- norm01(v["profit"], normC$profit_min, normC$profit_max)
+  hr_n     <- norm01(v["hr"],     normC$hr_min,     normC$hr_max)
+  
+  # maximizar: lucro alto e HR baixo
+  score <- w * profit_n - (1 - w) * hr_n - pen
+  list(score=as.numeric(score), metrics=v, s_repaired=s)
+}
+```
+
+```{r}
+# Hill Climbing com change function - Função de vizinhança (robusta para zeros)
+
+# Para J/X (inteiros): usa (x+1)*(1+δ)-1 para não ficar preso no zero.
+# Para PR: multiplicativo + clamp [0,0.30].
+# Perturba só uma fração das variáveis para controlar “granularidade”.
+
+neighbor_multiplicative <- function(s, lower, upper,
+                                   p_change=0.15, step=0.20) {
+  n <- length(s)
+  idx <- which(runif(n) < p_change)
+  if (length(idx) == 0) idx <- sample(1:n, 1)
+  
+  s2 <- s
+  delta <- runif(length(idx), -step, step)
+  
+  # identificar blocos
+  nBlock <- n/3
+  idxJ  <- idx[idx <= nBlock]
+  idxX  <- idx[idx > nBlock & idx <= 2*nBlock]
+  idxPR <- idx[idx > 2*nBlock]
+  
+  # J e X: multiplicativo com deslocamento
+  if (length(idxJ) > 0) {
+    s2[idxJ] <- (s2[idxJ] + 1) * (1 + delta[match(idxJ, idx)]) - 1
+  }
+  if (length(idxX) > 0) {
+    s2[idxX] <- (s2[idxX] + 1) * (1 + delta[match(idxX, idx)]) - 1
+  }
+  if (length(idxPR) > 0) {
+    s2[idxPR] <- s2[idxPR] * (1 + delta[match(idxPR, idx)])
+  }
+  
+  # clamp
+  s2 <- pmin(pmax(s2, lower), upper)
+  s2
+}
+
+
+```
+
+```{r}
+# Hill Climbing com change function - Maximização
+
+hill_climb <- function(s0, fn_obj, lower, upper,
+                       iters=2000, p_change=0.15, step=0.20,
+                       trace=TRUE) {
+  s_best <- pmin(pmax(s0, lower), upper)
+  o_best <- fn_obj(s_best)
+  best_score <- o_best$score
+  best_metrics <- o_best$metrics
+  best_srep <- o_best$s_repaired
+  
+  if (trace) cat("init score=", best_score, " profit=", best_metrics["profit"],
+                 " units=", best_metrics["units"], " hr=", best_metrics["hr"], "\n")
+  
+  for (t in 1:iters) {
+    s_new <- neighbor_multiplicative(s_best, lower, upper, p_change, step)
+    o_new <- fn_obj(s_new)
+    
+    if (o_new$score > best_score) {
+      s_best <- s_new
+      best_score <- o_new$score
+      best_metrics <- o_new$metrics
+      best_srep <- o_new$s_repaired
+      
+      if (trace && (t %% 50 == 0)) {
+        cat("iter", t, " score=", round(best_score,4),
+            " profit=", best_metrics["profit"],
+            " units=", best_metrics["units"],
+            " hr=", best_metrics["hr"], "\n")
+      }
+    }
+  }
+  
+  list(s=s_best, s_repaired=best_srep, score=best_score, metrics=best_metrics)
+}
+
+```
+
+```{r}
+# Bounds 
+
+calc_bounds <- function(preds_by_store) {
+  # preds_by_store: list(nome_loja -> vetor len 7)
+  lower <- rep(0, length(stores)*DAYS*3)
+  
+  # upper por loja/dia:
+  # Jmax ~ ceil(C/CAP_J), Xmax ~ ceil(C/CAP_X), PRmax = 0.30
+  Jmax <- Xmax <- PRmax <- matrix(0, nrow=length(stores), ncol=DAYS)
+  
+  for (i in seq_along(stores)) {
+    C <- preds_by_store[[stores[i]]]
+    Jmax[i,] <- ceiling(C / CAP_J)
+    Xmax[i,] <- ceiling(C / CAP_X)
+    PRmax[i,] <- rep(0.30, DAYS)
+  }
+  
+  upper <- encode_solution(Jmax, Xmax, PRmax)
+  list(lower=lower, upper=upper)
+}
+
+
+```
+
+```{r}
+# grid de pesos
+Wgrid <- seq(0.1, 1, by=0.1)
+
+set.seed(42)
+results <- list()
+
+for (w in Wgrid) {
+  fn <- function(s) objective_O3(
+    s, preds_by_store, lower, upper, normC,
+    w = w, use_repair = TRUE, max_units = 10000
+  )
+  
+  s0 <- runif(length(lower), min=lower, max=upper)
+  HC <- hill_climb(s0, fn, lower, upper,
+                   iters=2000, p_change=0.12, step=0.18, trace=FALSE)
+  
+  results[[paste0("w=", w)]] <- list(
+    w = w,
+    score = HC$score,
+    profit = as.numeric(HC$metrics["profit"]),
+    units  = as.numeric(HC$metrics["units"]),
+    hr     = as.numeric(HC$metrics["hr"]),
+    s_repaired = HC$s_repaired
+  )
+  
+  cat("w=", w,
+      " profit=", results[[paste0("w=", w)]]$profit,
+      " units=",  results[[paste0("w=", w)]]$units,
+      " hr=",     results[[paste0("w=", w)]]$hr, "\n")
+}
+
+# ----------- ESCOLHER O MELHOR (COM FILTRO) -----------
+scores  <- sapply(results, function(x) x$score)
+profits <- sapply(results, function(x) x$profit)
+
+valid <- profits >= 0
+
+if (any(valid)) {
+  best_key <- names(results)[ which.max(ifelse(valid, scores, -Inf)) ]
+} else {
+  cat("\nAviso: não houve soluções com lucro >= 0. Vou escolher o maior lucro.\n")
+  best_key <- names(results)[ which.max(profits) ]
+}
+
+best_run <- results[[best_key]]
+
+cat("\nBEST (filtered):", best_key,
+    " profit=", best_run$profit,
+    " units=",  best_run$units,
+    " hr=",     best_run$hr, "\n")
+
+
+```
+
+```{r}
+# O1 por loja
+
+
+# ------------------------------
+# Representação 1 loja (21 vars)
+# ------------------------------
+decode_store_solution <- function(s1) {
+  stopifnot(length(s1) == 21)
+  list(
+    J  = s1[1:7],
+    X  = s1[8:14],
+    PR = s1[15:21]
+  )
+}
+
+encode_store_solution <- function(J, X, PR) {
+  c(J, X, PR)
+}
+```
+
+```{r}
+# Bounds Por Loja
+
+calc_bounds_store <- function(pred7) {
+  lower <- rep(0, 21)
+  upper <- c(
+    ceiling(pred7 / CAP_J),  # J max por dia
+    ceiling(pred7 / CAP_X),  # X max por dia
+    rep(0.30, 7)             # PR max
+  )
+  list(lower=lower, upper=upper)
+}
+```
+
+```{r}
+# Objetivo O1 por loja (maximizar lucro semanal da loja)
+
+objective_O1_store <- function(s1, pred7, store_name, lower, upper) {
+  s1 <- pmin(pmax(s1, lower), upper)
+  dec <- decode_store_solution(s1)
+  
+  out <- eval_store_week(dec$J, dec$X, dec$PR, pred7, store_name)
+  
+  list(
+    score = as.numeric(out$profit),   # maximizar lucro semanal
+    metrics = out,
+    s_repaired = s1
+  )
+}
+```
+
+```{r}
+#  Função “runner” do Hill Climbing para O1
+
+run_O1_per_store <- function(preds_by_store, iters=2000, p_change=0.12, step=0.18, seed=42) {
+  set.seed(seed)
+  resO1 <- list()
+  
+  for (st in stores) {
+    pred7 <- preds_by_store[[st]]
+    bnd  <- calc_bounds_store(pred7)
+    lower1 <- bnd$lower
+    upper1 <- bnd$upper
+    
+    fn1 <- function(s1) objective_O1_store(s1, pred7, st, lower1, upper1)
+    s0 <- runif(21, min=lower1, max=upper1)
+    
+    HC <- hill_climb(s0, fn1, lower1, upper1,
+                     iters=iters, p_change=p_change, step=step, trace=FALSE)
+    
+    resO1[[st]] <- list(
+      store  = st,
+      profit = HC$metrics$profit,
+      units  = HC$metrics$units,
+      hr     = HC$metrics$hr,
+      s_best = HC$s_repaired
+    )
+    
+    cat("[O1]", st,
+        "profit=", resO1[[st]]$profit,
+        "units=",  resO1[[st]]$units,
+        "hr=",     resO1[[st]]$hr, "\n")
+  }
+  
+  resO1
+}
+
+```
+
+```{r}
+O1_results <- run_O1_per_store(preds_by_store, iters=2000)
+```
+
+```{r}
+best_run$s_repaired <- repair_O2(best_run$s_repaired, preds_by_store, upper, max_units=10000)
+```
+
+```{r}
+# print_plan() no estilo “Weekend elements” (por loja e dia)
+
+eval_store_daily_details <- function(Jd, Xd, PRd, pred7, store_name) {
+  p <- STORE_PARAMS[[store_name]]
+  FJ <- p$FJ; FX <- p$FX
+  
+  # limpar inputs
+  Jd  <- pmax(0, round(Jd))
+  Xd  <- pmax(0, round(Xd))
+  PRd <- pmax(0, pmin(0.30, PRd))
+  
+  day_names <- c("su","mo","tu","we","th","fr","sa")
+  
+  details <- data.frame(
+    day = day_names,
+    weekend = IS_WEEKEND,
+    customers = pred7,
+    PR = round(PRd, 3),
+    X  = Xd,
+    J  = Jd,
+    assisted = NA_integer_,
+    units = NA_integer_,
+    hr_cost = NA_real_,
+    profit = NA_real_
+  )
+  
+  for (d in 1:7) {
+    C_d <- pred7[d]
+    
+    # assistidos (X primeiro)
+    by_X <- min(Xd[d] * CAP_X, C_d)
+    by_J <- min(Jd[d] * CAP_J, max(0, C_d - by_X))
+    A_d  <- by_X + by_J
+    
+    log_term <- log(2 - PRd[d])
+    U_X <- round(FX * 10 / log_term)
+    U_J <- round(FJ * 10 / log_term)
+    
+    Xunits <- by_X * U_X
+    Junits <- by_J * U_J
+    units_d <- Xunits + Junits
+    
+    Xsales <- round(Xunits * (1 - PRd[d]) * 1.07)
+    Jsales <- round(Junits * (1 - PRd[d]) * 1.07)
+    
+    if (IS_WEEKEND[d]) {
+      XHRc <- Xd[d] * HR_COST$X_weekend
+      JHRc <- Jd[d] * HR_COST$J_weekend
+    } else {
+      XHRc <- Xd[d] * HR_COST$X_weekday
+      JHRc <- Jd[d] * HR_COST$J_weekday
+    }
+    hr_cost_d <- XHRc + JHRc
+    
+    profit_d <- (Xsales + Jsales) - hr_cost_d
+    
+    details$assisted[d] <- A_d
+    details$units[d]    <- units_d
+    details$hr_cost[d]  <- hr_cost_d
+    details$profit[d]   <- profit_d
+  }
+  
+  details
+}
+```
+
+```{r}
+
+print_plan <- function(s_repaired, preds_by_store, show_extra=TRUE, digits=2) {
+  dec <- decode_solution(s_repaired, S=length(stores), DAYS=7)
+  
+  cat("============================================================\n")
+  cat("WEEKLY PLAN (4 stores) — PR, J, X, profit_d, units_d\n")
+  cat("============================================================\n\n")
+  
+  total_profit <- 0
+  total_units  <- 0
+  total_hr     <- 0
+  
+  for (i in seq_along(stores)) {
+    st <- stores[i]
+    pred7 <- preds_by_store[[st]]
+    
+    det <- eval_store_daily_details(dec$J[i,], dec$X[i,], dec$PR[i,], pred7, st)
+    
+    # resumo semanal (igual ao eval_store_week)
+    week <- eval_store_week(dec$J[i,], dec$X[i,], dec$PR[i,], pred7, st)
+    total_profit <- total_profit + week$profit
+    total_units  <- total_units  + week$units
+    total_hr     <- total_hr     + week$hr
+    
+    cat("------------------------------------------------------------\n")
+    cat("STORE:", toupper(st), "\n")
+    cat("Weekly profit (net):", round(week$profit, digits), 
+        "| Weekly units:", week$units,
+        "| Weekly HR:", week$hr, "\n")
+    cat("------------------------------------------------------------\n")
+    
+    if (show_extra) {
+      # inclui customers, assisted, hr_cost
+      print(det[, c("day","weekend","customers","PR","X","J","assisted","units","hr_cost","profit")], row.names=FALSE)
+    } else {
+      # apenas o pedido essencial (estilo slides)
+      print(det[, c("day","PR","X","J","units","profit")], row.names=FALSE)
+    }
+    
+    cat("\n")
+  }
+  
+  cat("============================================================\n")
+  cat("TOTAL (4 stores): profit=", round(total_profit, digits),
+      " | units=", total_units,
+      " | HR=", total_hr, "\n")
+  cat("============================================================\n")
+  
+  invisible(list(profit=total_profit, units=total_units, hr=total_hr))
+}
+
+```
+
+```{r}
+best_key <- names(results)[ which.max(sapply(results, function(x) x$score)) ]
+best_run <- results[[best_key]]
+
+
+# garantir validade final O2:
+best_run$s_repaired <- repair_O2(best_run$s_repaired, preds_by_store, upper, max_units=10000)
+
+# imprimir estilo slides:
+print_plan(best_run$s_repaired, preds_by_store, show_extra=TRUE)
+
+```
+
+```{r}
+#Converter results (lista) para data.frame
+
+results_to_df <- function(results) {
+  df <- do.call(rbind, lapply(names(results), function(k) {
+    x <- results[[k]]
+    data.frame(
+      key    = k,
+      w      = as.numeric(x$w),
+      profit = as.numeric(x$profit),
+      hr     = as.numeric(x$hr),
+      units  = as.numeric(x$units),
+      score  = as.numeric(x$score)
+    )
+  }))
+  rownames(df) <- NULL
+  df
+}
+```
+
+```{r}
+#Identificar a “pseudo‑Pareto front” (não dominados)
+
+pareto_front <- function(df) {
+  n <- nrow(df)
+  nd <- rep(TRUE, n)  # não-dominado (nondominated)
+
+  for (i in 1:n) {
+    for (j in 1:n) {
+      if (i != j) {
+        dominates <- (df$profit[j] >= df$profit[i]) &&
+                    (df$hr[j]     <= df$hr[i]) &&
+                    ((df$profit[j] > df$profit[i]) || (df$hr[j] < df$hr[i]))
+        if (dominates) {
+          nd[i] <- FALSE
+          break
+        }
+      }
+    }
+  }
+  df$is_pareto <- nd
+  df
+}
+```
+
+```{r}
+plot_tradeoff <- function(results, show_labels=TRUE, highlight_pareto=TRUE) {
+  # aceitar results (lista) ou df
+  if (is.list(results) && !is.data.frame(results)) {
+    df <- results_to_df(results)
+  } else {
+    df <- results
+  }
+  
+  if (highlight_pareto) df <- pareto_front(df) else df$is_pareto <- FALSE
+  
+  # garantir ggplot2
+  if (!requireNamespace("ggplot2", quietly=TRUE)) {
+    stop("Precisas do pacote ggplot2. Instala com: install.packages('ggplot2')")
+  }
+  library(ggplot2)
+
+  p <- ggplot(df, aes(x=hr, y=profit, color=w)) +
+    geom_point(size=3, alpha=0.9) +
+    scale_color_gradient(low="royalblue3", high="firebrick3") +
+    labs(
+      title = "O3 — Compromisso Profit vs HR (cores por peso w)",
+      subtitle = "Cada ponto é o melhor plano encontrado para um peso w (Hill Climbing).",
+      x = "HR total semanal (Σ(J+X) nas 4 lojas)",
+      y = "Lucro total semanal ($) (4 lojas)",
+      color = "w (peso lucro)"
+    ) +
+    theme_minimal()
+  
+  # destacar pontos Pareto (não dominados)
+  if (highlight_pareto) {
+    p <- p +
+      geom_point(
+        data = subset(df, is_pareto),
+        aes(x=hr, y=profit),
+        inherit.aes = FALSE,
+        shape = 21, fill = "gold",
+        color = "black", size = 4, stroke = 1.1
+      )
+  }
+  
+  # rótulos w (bom quando tens poucos pontos)
+  if (show_labels) {
+    p <- p +
+      geom_text(
+        aes(label=sprintf("w=%.1f", w)),
+        nudge_y = 0.02 * diff(range(df$profit)),
+        size = 3,
+        show.legend = FALSE
+      )
+  }
+  
+  # “linha” ligando os pontos por w (ajuda a ver tendência)
+  df_ord <- df[order(df$w), ]
+  p <- p + geom_path(data=df_ord, aes(x=hr, y=profit), inherit.aes=FALSE,
+                     color="grey50", linewidth=0.6, alpha=0.6)
+  
+  # se quiseres desenhar a Pareto-front como linha
+  if (highlight_pareto) {
+    pf <- subset(df, is_pareto)
+    # ordenar por HR crescente
+    pf <- pf[order(pf$hr), ]
+    if (nrow(pf) >= 2) {
+      p <- p + geom_path(data=pf, aes(x=hr, y=profit), inherit.aes=FALSE,
+                         color="black", linewidth=1.0, alpha=0.9)
+    }
+  }
+  
+  p
+}
+```
+
+```{r}
+p <- plot_tradeoff(results, show_labels=TRUE, highlight_pareto=TRUE)
+print(p)
+```
+
+```{r}
+df <- pareto_front(results_to_df(results))
+df[order(df$w), c("w","profit","hr","units","score","is_pareto")]
+```
+
+```{r}
+
+```
