@@ -4,14 +4,286 @@ output: html_document
 date: "2026-04-27"
 ---
 
-# Optimziation
+# O1 - GENETIC ALGORITM OPTIMIZATION
 
 ```{r}
 library(rminer)
+library(dplyr)
+library(GA)
 ```
 
 ```{r}
 # Get Data
 forecast_data <- readRDS("optimization_data/forecasting.rds")
 ```
+
+```{r}
+# Store parameters
+store_params <- data.frame(
+  city = c("baltimore_multi",
+           "lancaster_multi",
+           "philadelphia_multi",
+           "richmond_multi"),
+
+  Fj = c(1.00, 1.05, 1.10, 1.15),
+  Fx = c(1.15, 1.20, 1.15, 1.25),
+
+  W = c(700, 730, 760, 800)
+)
+```
+
+```{r}
+# Forecast Data
+forecast_data <- forecast_data %>%
+  rename(C = predicted) %>%
+  left_join(store_params, by = "city") %>%
+  mutate(
+    date = as.Date(date),
+    is_weekend = weekdays(date) %in% c("Saturday", "Sunday")
+  ) %>%
+  arrange(city, date)
+```
+
+```{r}
+# Problem Dimensions
+n_stores <- 4
+n_days <- 7
+
+# Each day/store has: 
+# J, X, PR
+
+n_vars <- n_stores * n_days * 3
+```
+
+```{r}
+# Vector -> Matrices
+decode_solution <- function(sol) {
+  # Split Vector
+  idx_J <- 1:(n_stores * n_days)
+  
+  idx_X <- (max(idx_J) + 1):
+    (max(idx_J) + n_stores * n_days)
+  
+  idx_PR <- (max(idx_X) + 1):
+    (max(idx_X) + n_stores * n_days)
+  
+  # Convert to Matrices
+  J <- matrix(
+    round(sol[idx_J]),
+    nrow = n_stores,
+    byrow = TRUE
+  )
+  
+  X <- matrix(
+    round(sol[idx_X]),
+    nrow = n_stores,
+    byrow = TRUE
+  )
+  
+  PR <- matrix(
+    sol[idx_PR],
+    nrow = n_stores,
+    byrow = TRUE
+  )
+  
+  # Safety bounds
+  J[J < 0] <- 0
+  X[X < 0] <- 0
+  
+  PR[PR < 0] <- 0
+  PR[PR > 0.3] <- 0.3
+  
+  return(list(J = J, X = X, PR = PR))
+}
+```
+
+```{r}
+# Evaluation Function
+evaluation <- function(sol) {
+  decoded <- decode_solution(sol)
+
+  J_mat <- decoded$J
+  X_mat <- decoded$X
+  PR_mat <- decoded$PR
+
+  total_profit <- 0
+
+  cities <- unique(forecast_data$city)
+
+  # Loop Stores
+  for(s in 1:n_stores) {
+    city_data <- forecast_data %>%
+      filter(city == cities[s]) %>%
+      arrange(date)
+
+    weekly_profit <- 0
+    # Loop Days
+
+    for(d in 1:n_days) {
+      # Forecasted Customers
+      C <- city_data$C[d]
+
+      # Decision Variables
+      J <- J_mat[s, d]
+      X <- X_mat[s, d]
+      PR <- PR_mat[s, d]
+
+      # Store Parameters
+      Fj <- city_data$Fj[d]
+      Fx <- city_data$Fx[d]
+
+      # Assited Customers
+      A <- min((7 * X) + (6 * J), C)
+
+      # Experts first
+      cx <- min(A, 7*X)
+      # Remaining to Juniors
+      cj <- max(0, A-cx)
+
+      # Units Sold
+      Ux <- round((Fx * 10) / log(2 - PR))
+      Uj <- round((Fj * 10) / log(2 - PR))
+
+      # Profits per Client
+      Px <- round(Ux * (1 - PR) * 1.07)
+      Pj <- round(Uj * (1 - PR) * 1.07)
+
+      # Revenue
+      revenue <- (cx * Px) + (cj * Pj)
+
+      # HR Costs
+
+      if(city_data$is_weekend[d]){
+
+        cost_J <- 70
+        cost_X <- 95
+
+      } else {
+
+        cost_J <- 60
+        cost_X <- 80
+      }
+
+      hr_cost <- (J * cost_J) + (X * cost_X)
+
+      # Daily profit
+
+      daily_profit <- revenue - hr_cost
+
+      weekly_profit <- weekly_profit + daily_profit
+    }
+
+    # Fixed weekly cost
+    weekly_profit <- weekly_profit - city_data$W[1]
+    total_profit <- total_profit + weekly_profit
+  }
+
+  return(total_profit)
+}
+```
+
+```{r}
+# Lower / Upper Bounds
+lower <- c(
+  # J
+  rep(0, n_stores * n_days),
+
+  # X
+  rep(0, n_stores * n_days),
+
+  # PR
+  rep(0, n_stores * n_days)
+)
+
+upper <- c(
+  # J
+  rep(15, n_stores * n_days),
+
+  # X
+  rep(15, n_stores * n_days),
+
+  # PR
+  rep(0.30, n_stores * n_days)
+)
+```
+
+```{r}
+# Genetic Algorithm
+ga_result <- ga(
+
+  type = "real-valued",
+
+  fitness = evaluation,
+
+  lower = lower,
+  upper = upper,
+
+  popSize = 50,
+  maxiter = 100,
+
+  run = 30,
+
+  pcrossover = 0.8,
+  pmutation = 0.1,
+
+  elitism = 2,
+
+  seed = 123
+)
+```
+
+```{r}
+# Best Solution
+best_solution <- ga_result@solution[1, ]
+
+decoded_best <- decode_solution(best_solution)
+```
+
+```{r}
+# Final Profit
+best_profit <- evaluation(best_solution)
+
+cat("BEST WEEKLY PROFIT\n")
+cat(round(best_profit, 2), "\n")
+```
+
+```{r}
+# Show Best Plan
+cities <- unique(forecast_data$city)
+
+for(s in 1:n_stores){
+
+  cat("\n")
+  cat("=====================================\n")
+  cat("STORE:", cities[s], "\n")
+  cat("=====================================\n")
+
+  cat("\nJuniors:\n")
+  print(decoded_best$J[s, ])
+
+  cat("\nExperts:\n")
+  print(decoded_best$X[s, ])
+
+  cat("\nPromotions:\n")
+  print(round(decoded_best$PR[s, ], 2))
+}
+```
+
+```{r}
+# Convergence Plot
+plot(ga_result)
+```
+
+```{r}
+head(ga_result@summary)
+```
+
+```{r}
+tail(ga_result@summary)
+```
+
+
+
+
+
 
