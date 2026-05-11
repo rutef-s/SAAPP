@@ -1,20 +1,13 @@
----
-title: "R Notebook"
-output: html_notebook
----
-
 ```{r}
-# ═══════════════════════════════════════════════════════════════════════════
-# OPTIMIZAÇÃO — O1: Maximizar lucro semanal 
+ #═══════════════════════════════════════════════════════════════════════════
+# OPTIMIZAÇÃO — O1: Maximizar lucro semanal (1 store, Baltimore)
 # ═══════════════════════════════════════════════════════════════════════════
 
 # ── Parâmetros do modelo de negócio ─────────────────────────────────────────
-STORE_PARAMS <- list(
-  baltimore    = list(FJ=1.00, FX=1.15, W=700),
-  lancaster    = list(FJ=1.05, FX=1.20, W=730),
-  philadelphia = list(FJ=1.10, FX=1.15, W=760),
-  richmond     = list(FJ=1.15, FX=1.25, W=800)
-)
+FX          <- 1.15   # HR factor para X workers (sénior)
+FJ          <- 1.0    # HR factor para J workers (júnior)
+CAP_X       <- 7     # clientes por X worker por dia
+CAP_J       <- 6     # clientes por J worker por dia
 
 # Custos HR por worker por dia
 HR_COST <- list(
@@ -27,13 +20,13 @@ HR_COST <- list(
 # Custos fixos semanais por loja
 STORE_FIXED_COST <- list(
   baltimore    = 700,
-  lancaster    = 730,   
+  lancaster    = 700,   # ajustar quando confirmado
   philadelphia = 760,
-  richmond     = 800    
+  richmond     = 700    # ajustar quando confirmado
 )
 
-CAP_X      <- 7
-CAP_J      <- 6
+# Dias da semana: 1=Sunday ... 7=Saturday
+# Weekend = domingo (1) e sábado (7)
 IS_WEEKEND <- c(TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE)
 
 
@@ -45,14 +38,9 @@ IS_WEEKEND <- c(TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE)
 # ═══════════════════════════════════════════════════════════════════════════
 eval_s1 <- function(s, pred, store = "baltimore") {
 
-  params <- STORE_PARAMS[[store]]
-  FJ     <- params$FJ
-  FX     <- params$FX
-  W_s    <- params$W
-
-  J  <- round(s[1:7])
-  X  <- round(s[8:14])
-  PR <- pmax(0, pmin(0.30, s[15:21]))
+  J  <- round(s[1:7])         # nº de J workers por dia (inteiro)
+  X  <- round(s[8:14])        # nº de X workers por dia (inteiro)
+  PR <- pmax(0, pmin(0.30, s[15:21]))  # promoção por dia [0, 0.30]
 
   weekly_return <- 0
 
@@ -62,19 +50,24 @@ eval_s1 <- function(s, pred, store = "baltimore") {
     J_d  <- J[d]
     PR_d <- PR[d]
 
+    # ── Clientes assistidos ──────────────────────────────────────────────
     by_X <- min(X_d * CAP_X, C_d)
-    by_J <- min(J_d * CAP_J, max(0, C_d - by_X))
+    by_J <- min(J_d * CAP_J, max(0L, C_d - by_X))
 
+    # ── Unidades vendidas por cliente (fórmula do enunciado) ─────────────
     log_term <- log(2 - PR_d)
     U_X      <- round(FX * 10 / log_term)
     U_J      <- round(FJ * 10 / log_term)
 
+    # ── Total de unidades ────────────────────────────────────────────────
     Xunits <- by_X * U_X
     Junits <- by_J * U_J
 
+    # ── Lucro de vendas (fórmula do enunciado) ───────────────────────────
     Xsales <- round(Xunits * (1 - PR_d) * 1.07)
     Jsales <- round(Junits * (1 - PR_d) * 1.07)
 
+    # ── Custos de RH ─────────────────────────────────────────────────────
     if (IS_WEEKEND[d]) {
       XHRc <- X_d * HR_COST$X_weekend
       JHRc <- J_d * HR_COST$J_weekend
@@ -83,11 +76,15 @@ eval_s1 <- function(s, pred, store = "baltimore") {
       JHRc <- J_d * HR_COST$J_weekday
     }
 
-    R_d           <- Xsales + Jsales - XHRc - JHRc
+    # ── Retorno diário ───────────────────────────────────────────────────
+    R_d          <- Xsales + Jsales - XHRc - JHRc
     weekly_return <- weekly_return + R_d
   }
 
-  Rs <- weekly_return - W_s
+  # Retorno semanal líquido (subtrai custo fixo da loja)
+  W_s <- STORE_FIXED_COST[[store]]
+  Rs  <- weekly_return - W_s
+
   return(Rs)
 }
 
@@ -176,7 +173,7 @@ verify_eval()
 # Previsões para a próxima semana (vêm do modelo de forecasting)
 # Substitui pelos valores reais do prev_arimax_balt ou prev_balt
 
-pred_balt <- c(102,87,83,88,94,89,92)   # 7 valores previstos
+pred_balt <- c(79,55,133,142,139,152,176)   # 7 valores previstos
 
 # ── Bounds da solução ────────────────────────────────────────────────────────
 # s = c(J_1..J_7, X_1..X_7, PR_1..PR_7)
