@@ -1,0 +1,2 @@
+"objective","best_weekly_profit","total_units","constraint_limit","constraint_satisfied","population_size","generations","maxiter","run","pcrossover","pmutation","elitism"
+"O2",1196,10000,10000,TRUE,100,124,200,50,0.8,0.1,5

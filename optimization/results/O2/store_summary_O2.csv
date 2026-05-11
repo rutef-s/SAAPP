@@ -1,0 +1,5 @@
+"city","total_forecasted_customers","total_assisted_customers","total_units","total_juniors","total_experts","total_hr","avg_promotion","total_revenue","total_hr_cost","fixed_week_cost","weekly_profit"
+"baltimore_multi",588,154,2438,14,10,24,0.014,2592,1640,700,252
+"lancaster_multi",702,140,2264,14,8,22,0.019,2404,1480,730,194
+"philadelphia_multi",1336,153,2511,15,9,24,0.009,2664,1620,760,284
+"richmond_multi",389,159,2787,16,9,25,0.017,2946,1680,800,466
