@@ -711,16 +711,18 @@ pareto_front <- function(df) {
 
 ```{r}
 plot_tradeoff <- function(results, show_labels=TRUE, highlight_pareto=TRUE) {
-  # aceitar results (lista) ou df
+  
   if (is.list(results) && !is.data.frame(results)) {
     df <- results_to_df(results)
   } else {
     df <- results
   }
   
+  # manter apenas soluções economicamente viáveis
+  df <- df[df$profit >= 0, ]
+  
   if (highlight_pareto) df <- pareto_front(df) else df$is_pareto <- FALSE
   
-  # garantir ggplot2
   if (!requireNamespace("ggplot2", quietly=TRUE)) {
     stop("Precisas do pacote ggplot2. Instala com: install.packages('ggplot2')")
   }
@@ -729,16 +731,16 @@ plot_tradeoff <- function(results, show_labels=TRUE, highlight_pareto=TRUE) {
   p <- ggplot(df, aes(x=hr, y=profit, color=w)) +
     geom_point(size=3, alpha=0.9) +
     scale_color_gradient(low="royalblue3", high="firebrick3") +
+    scale_y_continuous(limits = c(0, NA)) +
     labs(
       title = "O3 — Compromisso Profit vs HR (cores por peso w)",
-      subtitle = "Cada ponto é o melhor plano encontrado para um peso w (Hill Climbing).",
+      subtitle = "Apenas soluções com lucro não-negativo (Hill Climbing).",
       x = "HR total semanal (Σ(J+X) nas 4 lojas)",
-      y = "Lucro total semanal ($) (4 lojas)",
+      y = "Lucro total semanal ($)",
       color = "w (peso lucro)"
     ) +
     theme_minimal()
   
-  # destacar pontos Pareto (não dominados)
   if (highlight_pareto) {
     p <- p +
       geom_point(
@@ -750,30 +752,32 @@ plot_tradeoff <- function(results, show_labels=TRUE, highlight_pareto=TRUE) {
       )
   }
   
-  # rótulos w (bom quando tens poucos pontos)
   if (show_labels) {
     p <- p +
       geom_text(
         aes(label=sprintf("w=%.1f", w)),
-        nudge_y = 0.02 * diff(range(df$profit)),
+        nudge_y = 0.02 * max(df$profit),
         size = 3,
         show.legend = FALSE
       )
   }
   
-  # “linha” ligando os pontos por w (ajuda a ver tendência)
   df_ord <- df[order(df$w), ]
-  p <- p + geom_path(data=df_ord, aes(x=hr, y=profit), inherit.aes=FALSE,
-                     color="grey50", linewidth=0.6, alpha=0.6)
+  p <- p + geom_path(
+    data=df_ord, aes(x=hr, y=profit),
+    inherit.aes=FALSE,
+    color="grey50", linewidth=0.6, alpha=0.6
+  )
   
-  # se quiseres desenhar a Pareto-front como linha
   if (highlight_pareto) {
     pf <- subset(df, is_pareto)
-    # ordenar por HR crescente
     pf <- pf[order(pf$hr), ]
     if (nrow(pf) >= 2) {
-      p <- p + geom_path(data=pf, aes(x=hr, y=profit), inherit.aes=FALSE,
-                         color="black", linewidth=1.0, alpha=0.9)
+      p <- p + geom_path(
+        data=pf, aes(x=hr, y=profit),
+        inherit.aes=FALSE,
+        color="black", linewidth=1.0
+      )
     }
   }
   
@@ -791,6 +795,292 @@ df <- pareto_front(results_to_df(results))
 df[order(df$w), c("w","profit","hr","units","score","is_pareto")]
 ```
 
+# Metodo NGSA-II
 ```{r}
+# install.packages("mco")
+library(mco)
 
+col_sort_matrix <- function(M, column=1) {
+  if (is.matrix(M) && nrow(M) > 1) {
+    I <- sort.int(M[, column], index.return=TRUE)
+    M <- M[I$ix, ]
+  }
+  return(M)
+}
+```
+
+# Funcao Fes1
+```{r}
+fes1_O3 <- function(s) {
+  # garantir bounds
+  s <- pmin(pmax(s, lower), upper)
+  
+  # O2 dentro do O3:
+  # aplica repair para garantir units <= 10000
+  s <- repair_O2(s, preds_by_store, upper, max_units=10000)
+  
+  # avaliar solução reparada
+  v <- eval_allstores(s, preds_by_store)
+  
+  profit <- as.numeric(v["profit"])
+  hr     <- as.numeric(v["hr"])
+  
+  # NSGA-II minimiza:
+  # minimizar -profit equivale a maximizar profit
+  # minimizar hr equivale a minimizar recursos humanos
+  return(c(-profit, hr))
+}
+```
+
+# Correr O3 com NSGA-II
+```{r}
+m <- 2
+D <- length(lower)  # 84 parâmetros
+
+cat("O3 com NSGA-II para 4 lojas, D=", D, "\n")
+
+set.seed(42)
+
+G <- mco::nsga2(
+  fn = fes1_O3,
+  idim = D,
+  odim = m,
+  lower.bounds = lower,
+  upper.bounds = upper,
+  popsize = 80,
+  generations = 1:100
+)
+```
+# Melhores indivíduos da última geração
+```{r}
+last_gen <- 100
+
+P <- G[[last_gen]]
+I <- which(P$pareto.optimal)
+
+# objetivos minimização: f1=-profit, f2=HR
+M <- cbind(
+  round(P$value[I, ], digits=2)
+)
+
+M <- col_sort_matrix(M, 1)
+
+cat("\nSoluções Pareto NSGA-II, geração", last_gen, "\n")
+for (i in 1:nrow(M)) {
+  cat("f=(-profit, HR)=(",
+      M[i,1], ", ", M[i,2],
+      ") | profit=", -M[i,1],
+      " | HR=", M[i,2], "\n", sep="")
+}
+```
+# Evolução da fronteira Pareto
+```{r}
+# Evolução da Pareto front
+for (i in 1:last_gen) {
+  
+  Pgen <- G[[i]]$value
+  
+  # converter para gráfico interpretável:
+  # x = HR
+  # y = profit
+  HR_gen <- Pgen[,2]
+  PROF_gen <- -Pgen[,1]
+  
+  COL <- paste("gray", round(76 - i * 0.75), sep="")
+  
+  if (i == 1) {
+    plot(
+      HR_gen, PROF_gen,
+      xlab = "HR total semanal",
+      ylab = "Lucro total semanal ($)",
+      main = "Evolução da fronteira Pareto — NSGA-II",
+      cex = 0.5,
+      col = COL,
+      pch = 1,
+      ylim = c(0, max(PROF_gen, na.rm=TRUE) * 1.2)
+    )
+  }
+  
+  points(HR_gen, PROF_gen, type="p", pch=1, cex=0.5, col=COL)
+  
+  Pareto <- Pgen[G[[i]]$pareto.optimal, ]
+  
+  if (is.matrix(Pareto) && nrow(Pareto) > 1) {
+    # ordenar por HR para desenhar a linha corretamente
+    Pareto_plot <- cbind(HR = Pareto[,2], Profit = -Pareto[,1])
+    Pareto_plot <- col_sort_matrix(Pareto_plot, 1)
+    lines(Pareto_plot, type="l", col=COL)
+  }
+}
+```
+# Última fronteira Pareto + Pareto filter no “fes1”
+```{r}
+# última geração
+P <- G[[last_gen]]
+
+# matriz de objetivos: f1=-profit, f2=HR
+FES1 <- P$value
+
+# aplicar Pareto filter no FES1
+FES1_PF <- mco::paretoFilter(FES1)
+
+# ordenar por f1
+FES1_PF <- col_sort_matrix(FES1_PF, 1)
+
+cat("\nNúmero de pontos antes do Pareto filter:", nrow(FES1), "\n")
+cat("Número de pontos depois do Pareto filter:", nrow(FES1_PF), "\n")
+
+NSGA_PLOT <- data.frame(
+  profit = -FES1_PF[,1],
+  hr     =  FES1_PF[,2]
+)
+
+NSGA_PLOT <- NSGA_PLOT[NSGA_PLOT$profit >= 0, ]
+NSGA_PLOT <- NSGA_PLOT[order(NSGA_PLOT$hr), ]
+```
+# Criar conjunto Pareto do método por pesos
+```{r}
+df_weights <- results_to_df(results)
+
+# manter apenas lucros não negativos
+df_weights <- df_weights[df_weights$profit >= 0, ]
+
+# converter para minimização: f1=-profit, f2=HR
+M_PT <- cbind(
+  -df_weights$profit,
+   df_weights$hr
+)
+
+# aplicar paretoFilter como no exemplo
+M_PT <- mco::paretoFilter(M_PT)
+
+# ordenar por f1
+M_PT <- col_sort_matrix(M_PT, 1)
+
+WEIGHTS_PLOT <- data.frame(
+  profit = -M_PT[,1],
+  hr     =  M_PT[,2]
+)
+
+WEIGHTS_PLOT <- WEIGHTS_PLOT[order(WEIGHTS_PLOT$hr), ]
+```
+
+# Ponto de referência mau para hipervolume
+```{r}
+ALL_F <- rbind(
+  FES1_PF,
+  M_PT
+)
+
+ref_pt <- c(
+  max(ALL_F[,1]) + 0.10 * abs(max(ALL_F[,1]) - min(ALL_F[,1])) + 1,
+  max(ALL_F[,2]) + 0.10 * abs(max(ALL_F[,2]) - min(ALL_F[,2])) + 1
+)
+
+cat("\nPonto de referência mau para hipervolume:\n")
+cat("ref_pt = (", ref_pt[1], ", ", ref_pt[2], ")\n", sep="")
+cat("Em escala interpretável: profit =", -ref_pt[1], "| HR =", ref_pt[2], "\n")
+```
+# Calcular hipervolume NSGA-II vs método por pesos (Maior hipervolume = melhor cobertura da fronteira Pareto, considerando o mesmo ponto de referência)
+```{r}
+hv_nsga <- mco::dominatedHypervolume(FES1_PF, ref_pt)
+hv_weights <- mco::dominatedHypervolume(M_PT, ref_pt)
+
+cat("\nHipervolume NSGA-II:", round(hv_nsga, digits=2), "\n")
+cat("Hipervolume método por pesos:", round(hv_weights, digits=2), "\n")
+
+if (hv_nsga > hv_weights) {
+  cat("NSGA-II obteve melhor hipervolume.\n")
+} else {
+  cat("Método por pesos obteve melhor hipervolume.\n")
+}
+```
+# Gráfico final: NSGA-II vs método por pesos + ponto de referência
+```{r}
+# gráfico em escala interpretável: x=HR, y=profit
+plot(
+  NSGA_PLOT$hr, NSGA_PLOT$profit,
+  xlab = "HR total semanal",
+  ylab = "Lucro total semanal ($)",
+  main = paste("O3 — NSGA-II vs Pesos | HV NSGA-II=",
+               round(hv_nsga,2),
+               " | HV Pesos=",
+               round(hv_weights,2)),
+  pch = 19,
+  col = "black",
+  cex = 0.7,
+  ylim = c(0, max(c(NSGA_PLOT$profit, WEIGHTS_PLOT$profit), na.rm=TRUE) * 1.15),
+  xlim = range(c(NSGA_PLOT$hr, WEIGHTS_PLOT$hr, ref_pt[2]), na.rm=TRUE)
+)
+
+# linha NSGA-II
+if (nrow(NSGA_PLOT) >= 2) {
+  lines(NSGA_PLOT$hr, NSGA_PLOT$profit, col="black", lwd=2)
+}
+
+# método por pesos
+points(
+  WEIGHTS_PLOT$hr, WEIGHTS_PLOT$profit,
+  pch = 5,
+  col = "red",
+  lwd = 3,
+  cex = 1.2
+)
+
+if (nrow(WEIGHTS_PLOT) >= 2) {
+  lines(WEIGHTS_PLOT$hr, WEIGHTS_PLOT$profit, col="red", lwd=2)
+}
+
+# ponto de referência em escala interpretável
+ref_profit_plot <- -ref_pt[1]
+ref_hr_plot <- ref_pt[2]
+
+abline(v = ref_hr_plot, col="gray", lty=2)
+abline(h = max(0, ref_profit_plot), col="gray", lty=2)
+
+points(ref_hr_plot, max(0, ref_profit_plot), col="gray30", pch=4, cex=1.5, lwd=2)
+
+legend(
+  "bottomright",
+  legend = c("NSGA-II Pareto", "Método por pesos", "Ponto referência mau"),
+  col = c("black", "red", "gray30"),
+  pch = c(19, 5, 4),
+  lwd = c(2, 2, NA),
+  bty = "n"
+)
+```
+# Best profit e lucro mediano para 1 semana
+```{r}
+summary_profit <- function(df, method_name="method") {
+  cat("\nResumo semanal —", method_name, "\n")
+  cat("N soluções Pareto:", nrow(df), "\n")
+  cat("Best profit:", max(df$profit, na.rm=TRUE), "\n")
+  cat("Lucro mediano:", median(df$profit, na.rm=TRUE), "\n")
+  cat("Menor HR:", min(df$hr, na.rm=TRUE), "\n")
+  cat("Maior HR:", max(df$hr, na.rm=TRUE), "\n")
+}
+
+summary_profit(NSGA_PLOT, "NSGA-II")
+summary_profit(WEIGHTS_PLOT, "Método por pesos")
+```
+# Escolher a melhor solução NSGA-II por lucro
+```{r}
+# identificar índice da melhor solução em profit na última geração
+P <- G[[last_gen]]
+
+profit_all <- -P$value[,1]
+hr_all <- P$value[,2]
+
+best_idx <- which.max(profit_all)
+
+best_nsga_s <- P$par[best_idx, ]
+
+# reparar novamente por segurança
+best_nsga_s <- repair_O2(best_nsga_s, preds_by_store, upper, max_units=10000)
+
+cat("\nMelhor solução NSGA-II por profit:\n")
+v_best_nsga <- eval_allstores(best_nsga_s, preds_by_store)
+print(v_best_nsga)
+
+print_plan(best_nsga_s, preds_by_store, show_extra=TRUE)
 ```
