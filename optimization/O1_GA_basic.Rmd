@@ -9,12 +9,14 @@ date: "2026-04-27"
 ```{r}
 library(rminer)
 library(dplyr)
+library(tidyr)
 library(GA)
+library(ggplot2)
 ```
 
 ```{r}
 # Get Data
-forecast_data <- readRDS("optimization_data/forecasting.rds")
+forecast_data <- readRDS("../optimization_data/forecasting.rds")
 ```
 
 ```{r}
@@ -98,53 +100,63 @@ decode_solution <- function(sol) {
 ```
 
 ```{r}
-# Evaluation Function
-evaluation <- function(sol) {
+# Evaluation Function + Optional Plan Output
+evaluation <- function(sol, return_plan = FALSE) {
+
   decoded <- decode_solution(sol)
 
-  J_mat <- decoded$J
-  X_mat <- decoded$X
+  J_mat  <- decoded$J
+  X_mat  <- decoded$X
   PR_mat <- decoded$PR
 
   total_profit <- 0
+  final_plan <- data.frame()
 
   cities <- unique(forecast_data$city)
 
-  # Loop Stores
+  # Loop stores
   for(s in 1:n_stores) {
+
     city_data <- forecast_data %>%
       filter(city == cities[s]) %>%
       arrange(date)
 
     weekly_profit <- 0
-    # Loop Days
 
+    # Loop days
     for(d in 1:n_days) {
+
       # Forecasted Customers
       C <- city_data$C[d]
 
       # Decision Variables
-      J <- J_mat[s, d]
-      X <- X_mat[s, d]
+      J  <- J_mat[s, d]
+      X  <- X_mat[s, d]
       PR <- PR_mat[s, d]
+
+      # Security bounds
+      J  <- max(round(J), 0)
+      X  <- max(round(X), 0)
+      PR <- min(max(PR, 0), 0.30)
 
       # Store Parameters
       Fj <- city_data$Fj[d]
       Fx <- city_data$Fx[d]
 
-      # Assited Customers
+      # Assisted Customers
       A <- min((7 * X) + (6 * J), C)
 
       # Experts first
-      cx <- min(A, 7*X)
+      cx <- min(A, 7 * X)
+
       # Remaining to Juniors
-      cj <- max(0, A-cx)
+      cj <- max(0, A - cx)
 
       # Units Sold
       Ux <- round((Fx * 10) / log(2 - PR))
       Uj <- round((Fj * 10) / log(2 - PR))
 
-      # Profits per Client
+      # Profit per Client
       Px <- round(Ux * (1 - PR) * 1.07)
       Pj <- round(Uj * (1 - PR) * 1.07)
 
@@ -152,33 +164,74 @@ evaluation <- function(sol) {
       revenue <- (cx * Px) + (cj * Pj)
 
       # HR Costs
-
-      if(city_data$is_weekend[d]){
-
+      if(city_data$is_weekend[d]) {
         cost_J <- 70
         cost_X <- 95
-
       } else {
-
         cost_J <- 60
         cost_X <- 80
       }
 
       hr_cost <- (J * cost_J) + (X * cost_X)
 
-      # Daily profit
-
+      # Daily Profit
       daily_profit <- revenue - hr_cost
 
       weekly_profit <- weekly_profit + daily_profit
+
+      # Save row for final plan
+      final_plan <- rbind(
+        final_plan,
+        data.frame(
+          city = cities[s],
+          horizon = city_data$horizon[d],
+          date = city_data$date[d],
+          forecasted_customers = C,
+
+          Juniors = J,
+          Experts = X,
+          PR_raw = PR,
+          Promotion = round(PR, 2),
+
+          Fj = Fj,
+          Fx = Fx,
+          W = city_data$W[d],
+          is_weekend = city_data$is_weekend[d],
+
+          assisted_customers = A,
+          customers_by_experts = cx,
+          customers_by_juniors = cj,
+
+          units_expert = Ux,
+          units_junior = Uj,
+
+          profit_client_expert = Px,
+          profit_client_junior = Pj,
+
+          total_units = (cx * Ux) + (cj * Uj),
+          revenue = revenue,
+
+          cost_junior = cost_J,
+          cost_expert = cost_X,
+          hr_cost = hr_cost,
+
+          daily_profit = daily_profit,
+          total_hr = J + X
+        )
+      )
     }
 
     # Fixed weekly cost
     weekly_profit <- weekly_profit - city_data$W[1]
+
     total_profit <- total_profit + weekly_profit
   }
 
-  return(total_profit)
+  if(return_plan == TRUE) {
+    return(final_plan)
+  } else {
+    return(total_profit)
+  }
 }
 ```
 
@@ -245,45 +298,272 @@ best_profit <- evaluation(best_solution)
 
 cat("BEST WEEKLY PROFIT\n")
 cat(round(best_profit, 2), "\n")
+
+final_plan <- evaluation(
+  best_solution,
+  return_plan = TRUE
+)
+```
+
+
+```{r}
+# Store Summary
+store_summary <- final_plan %>%
+  group_by(city) %>%
+  summarise(
+    total_forecasted_customers = sum(forecasted_customers),
+    total_assisted_customers = sum(assisted_customers),
+    total_units = sum(total_units),
+    
+    total_juniors = sum(Juniors),
+    total_experts = sum(Experts),
+    total_hr = sum(total_hr),
+    
+    avg_promotion = round(mean(PR_raw), 3),
+    
+    total_revenue = sum(revenue),
+    total_hr_cost = sum(hr_cost),
+    fixed_week_cost = first(W),
+    
+    weekly_profit = sum(daily_profit) - first(W),
+    
+    .groups = "drop"
+  )
 ```
 
 ```{r}
-# Show Best Plan
-cities <- unique(forecast_data$city)
+# Validation
+sum_profit_from_plan <- sum(store_summary$weekly_profit)
 
-for(s in 1:n_stores){
-
-  cat("\n")
-  cat("=====================================\n")
-  cat("STORE:", cities[s], "\n")
-  cat("=====================================\n")
-
-  cat("\nJuniors:\n")
-  print(decoded_best$J[s, ])
-
-  cat("\nExperts:\n")
-  print(decoded_best$X[s, ])
-
-  cat("\nPromotions:\n")
-  print(round(decoded_best$PR[s, ], 2))
-}
+cat("Profit from GA evaluation: ", round(best_profit, 2), "\n")
+cat("Profit from final_plan   : ", round(sum_profit_from_plan, 2), "\n")
+cat("Difference               : ", round(best_profit - sum_profit_from_plan, 6), "\n")
 ```
 
+
+
 ```{r}
-# Convergence Plot
 plot(ga_result)
+title(main = "GA Convergence Plot - O1")
+```
+
+The **convergence plot** shows the evolution of the Genetic Algorithm during the optimization process for O1. The best fitness value increases rapidly in the first generations, indicating that the algorithm quickly improves the initial population and finds more profitable weekly plans. The mean fitness also increases, which suggests that the overall population quality is improving, not only a single individual solution. This behavior indicates that the Genetic Algorithm is effectively converging towards better solutions for maximizing the weekly profit.
+
+```{r}
+# Save image
+png(
+  filename = "results/GA_convergence_O1.png",
+  width = 1200,
+  height = 800,
+  bg = "white"
+)
+
+par(
+  bg = "white",
+  mar = c(5, 5, 5, 2)  # bottom, left, top, right
+)
+
+plot(ga_result)
+
+title(
+  main = "Genetic Algorithm Convergence - O1",
+  cex.main = 1.6,
+  font.main = 2
+)
+
+dev.off()
 ```
 
 ```{r}
-head(ga_result@summary)
+write.csv(
+  final_plan,
+  "results/final_plan_O1.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  store_summary,
+  "results/store_summary_O1.csv",
+  row.names = FALSE
+)
+
+final_metrics <- data.frame(
+  best_weekly_profit = best_profit,
+  population_size = ga_result@popSize,
+  generations = ga_result@iter,
+  maxiter = ga_result@maxiter,
+  run = ga_result@run,
+  pcrossover = ga_result@pcrossover,
+  pmutation = ga_result@pmutation,
+  elitism = ga_result@elitism
+)
+
+write.csv(
+  final_metrics,
+  "results/GA_metrics_O1.csv",
+  row.names = FALSE
+)
 ```
 
 ```{r}
-tail(ga_result@summary)
+# Forecasted vs Assisted Customers - O1
+p_forecast_assisted <- ggplot(final_plan, aes(x = horizon)) +
+  geom_line(
+    aes(y = assisted_customers, linetype = "Assisted"),
+    linewidth = 1,
+    color = "black"
+  ) +
+  geom_point(
+    aes(y = assisted_customers, shape = "Assisted"),
+    size = 2,
+    color = "black"
+  ) +
+  geom_line(
+    aes(y = forecasted_customers, linetype = "Forecasted"),
+    linewidth = 1,
+    color = "black"
+  ) +
+  geom_point(
+    aes(y = forecasted_customers, shape = "Forecasted"),
+    size = 2,
+    color = "black"
+  ) +
+  facet_wrap(~ city, scales = "free_y") +
+  labs(
+    title = "Forecasted vs Assisted Customers - O1",
+    x = "Horizon",
+    y = "Customers",
+    linetype = "Type",
+    shape = "Type"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    legend.background = element_rect(fill = "white", color = NA),
+    legend.key = element_rect(fill = "white", color = NA),
+    strip.background = element_rect(fill = "white", color = NA),
+    text = element_text(color = "black"),
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black"),
+    plot.title = element_text(color = "black", face = "bold"),
+    strip.text = element_text(color = "black"),
+    legend.text = element_text(color = "black"),
+    legend.title = element_text(color = "black")
+  )
+
+ggsave(
+  filename = "results/forecasted_vs_assisted_O1.png",
+  plot = p_forecast_assisted,
+  width = 12,
+  height = 7,
+  dpi = 300,
+  bg = "white"
+)
+
+p_forecast_assisted
 ```
 
+This figure compares the forecasted number of customers with the number of customers that can actually be assisted under the optimized O1 plan for each store and horizon. In general, Baltimore, Lancaster, and Richmond show a close match between forecasted and assisted customers in several periods, which indicates that the selected staffing levels are often sufficient to meet demand. However, Philadelphia presents the largest gaps, especially in horizons 1, 6, and 7, meaning that the forecasted demand is considerably higher than the store’s service capacity in those periods.
 
+Overall, the graph highlights how the optimization model translates demand forecasts into operational decisions. It also shows that the capacity defined by the chosen numbers of juniors and experts is not always enough to serve all expected customers, particularly in stores with higher forecasted demand.
 
+```{r}
+# HR Allocation by Store - O1
 
+hr_long <- store_summary %>%
+  select(city, total_juniors, total_experts) %>%
+  pivot_longer(
+    cols = c(total_juniors, total_experts),
+    names_to = "HR_type",
+    values_to = "Total"
+  ) %>%
+  mutate(
+    HR_type = recode(
+      HR_type,
+      total_juniors = "Juniors",
+      total_experts = "Experts"
+    )
+  )
 
+p_hr <- ggplot(hr_long, aes(x = city, y = Total, fill = HR_type)) +
+  geom_col() +
+  labs(
+    title = "HR Allocation by Store - O1",
+    x = "Store",
+    y = "Total HR Resources",
+    fill = "HR Type"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    legend.background = element_rect(fill = "white", color = NA),
+    legend.key = element_rect(fill = "white", color = NA),
+    text = element_text(color = "black"),
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black"),
+    plot.title = element_text(color = "black", face = "bold"),
+    legend.text = element_text(color = "black"),
+    legend.title = element_text(color = "black"),
+    axis.text.x = element_text(angle = 25, hjust = 1, color = "black")
+  )
 
+ggsave(
+  filename = "results/HR_allocation_O1.png",
+  plot = p_hr,
+  width = 10,
+  height = 6,
+  dpi = 300,
+  bg = "white"
+)
+
+p_hr
+```
+
+This figure shows the total allocation of human resources selected by the Genetic Algorithm for each store under the O1 objective. Philadelphia receives the highest number of HR resources, which is consistent with its higher forecasted demand observed in the previous analysis. Richmond receives the lowest allocation, reflecting its lower expected customer volume.
+
+The chart also shows the balance between juniors and experts in each store. Since experts can assist more customers but have higher costs, while juniors are cheaper but less productive, the selected allocation represents the trade-off found by the optimization model between service capacity and staffing cost. Overall, the HR distribution appears consistent with the demand levels across stores.
+
+```{r}
+# Profit by Store - O1
+
+p_profit <- ggplot(store_summary, aes(x = city, y = weekly_profit)) +
+  geom_col() +
+  geom_text(
+    aes(label = round(weekly_profit, 0)),
+    vjust = -0.3,
+    size = 4,
+    color = "black"
+  ) +
+  labs(
+    title = "Weekly Profit by Store - O1",
+    x = "Store",
+    y = "Weekly Profit ($)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    text = element_text(color = "black"),
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black"),
+    plot.title = element_text(color = "black", face = "bold"),
+    axis.text.x = element_text(angle = 25, hjust = 1, color = "black")
+  )
+
+ggsave(
+  filename = "results/profit_by_store_O1.png",
+  plot = p_profit,
+  width = 10,
+  height = 6,
+  dpi = 300,
+  bg = "white"
+)
+
+p_profit
+```
+
+This figure presents the weekly profit obtained for each store under the optimized O1 solution. Philadelphia achieves the highest profit, followed by Lancaster, which is consistent with their higher demand levels and larger HR allocation. Baltimore and Richmond generate lower profits, reflecting their smaller assisted customer volumes and lower operational scale.
+
+Overall, the results show that the Genetic Algorithm allocates resources in a way that leads to positive weekly profit across all stores. The distribution of profit also confirms that stores with higher expected demand tend to contribute more to the total objective value, even though they require higher staffing costs.
