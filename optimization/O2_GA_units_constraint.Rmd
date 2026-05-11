@@ -1,0 +1,536 @@
+---
+title: "O2_GA_units_constraint"
+output: html_document
+date: "2026-05-11"
+---
+
+# O2 - 
+
+```{r}
+# Libraries
+library(rminer)
+library(dplyr)
+library(ggplot2)
+```
+
+```{r}
+# Get Data
+forecast_data <- readRDS("../optimization_data/forecasting.rds")
+```
+
+```{r}
+# Store parameters
+store_params <- data.frame(
+  city = c("baltimore_multi",
+           "lancaster_multi",
+           "philadelphia_multi",
+           "richmond_multi"),
+
+  Fj = c(1.00, 1.05, 1.10, 1.15),
+  Fx = c(1.15, 1.20, 1.15, 1.25),
+
+  W = c(700, 730, 760, 800)
+)
+```
+
+```{r}
+# Forecast Data
+forecast_data <- forecast_data %>%
+  rename(C = predicted) %>%
+  left_join(store_params, by = "city") %>%
+  mutate(
+    date = as.Date(date),
+    is_weekend = weekdays(date) %in% c("Saturday", "Sunday")
+  ) %>%
+  arrange(city, date)
+```
+
+```{r}
+# Problem Dimensions
+n_stores <- 4
+n_days <- 7
+
+# Each day/store has: 
+# J, X, PR
+
+n_vars <- n_stores * n_days * 3
+```
+
+```{r}
+# Vector -> Matrices
+decode_solution <- function(sol) {
+  # Split Vector
+  idx_J <- 1:(n_stores * n_days)
+  
+  idx_X <- (max(idx_J) + 1):
+    (max(idx_J) + n_stores * n_days)
+  
+  idx_PR <- (max(idx_X) + 1):
+    (max(idx_X) + n_stores * n_days)
+  
+  # Convert to Matrices
+  J <- matrix(
+    round(sol[idx_J]),
+    nrow = n_stores,
+    byrow = TRUE
+  )
+  
+  X <- matrix(
+    round(sol[idx_X]),
+    nrow = n_stores,
+    byrow = TRUE
+  )
+  
+  PR <- matrix(
+    sol[idx_PR],
+    nrow = n_stores,
+    byrow = TRUE
+  )
+  
+  # Safety bounds
+  J[J < 0] <- 0
+  X[X < 0] <- 0
+  
+  PR[PR < 0] <- 0
+  PR[PR > 0.3] <- 0.3
+  
+  return(list(J = J, X = X, PR = PR))
+}
+```
+
+```{r}
+# Evaluation Function - O2
+# Maximize profit with total_units <= 10000
+evaluation <- function(sol, return_plan = FALSE) {
+
+  decoded <- decode_solution(sol)
+
+  J_mat  <- decoded$J
+  X_mat  <- decoded$X
+  PR_mat <- decoded$PR
+
+  total_profit <- 0
+  total_units_all <- 0
+
+  final_plan <- data.frame()
+
+  cities <- unique(forecast_data$city)
+
+  for(s in 1:n_stores) {
+
+    city_data <- forecast_data %>%
+      filter(city == cities[s]) %>%
+      arrange(date)
+
+    weekly_profit <- 0
+
+    for(d in 1:n_days) {
+
+      C <- city_data$C[d]
+
+      J  <- J_mat[s, d]
+      X  <- X_mat[s, d]
+      PR <- PR_mat[s, d]
+
+      J  <- max(round(J), 0)
+      X  <- max(round(X), 0)
+      PR <- min(max(PR, 0), 0.30)
+
+      Fj <- city_data$Fj[d]
+      Fx <- city_data$Fx[d]
+
+      A <- min((7 * X) + (6 * J), C)
+
+      cx <- min(A, 7 * X)
+      cj <- max(0, A - cx)
+
+      Ux <- round((Fx * 10) / log(2 - PR))
+      Uj <- round((Fj * 10) / log(2 - PR))
+
+      Px <- round(Ux * (1 - PR) * 1.07)
+      Pj <- round(Uj * (1 - PR) * 1.07)
+
+      total_units_day <- (cx * Ux) + (cj * Uj)
+
+      revenue <- (cx * Px) + (cj * Pj)
+
+      if(city_data$is_weekend[d]) {
+        cost_J <- 70
+        cost_X <- 95
+      } else {
+        cost_J <- 60
+        cost_X <- 80
+      }
+
+      hr_cost <- (J * cost_J) + (X * cost_X)
+
+      daily_profit <- revenue - hr_cost
+
+      weekly_profit <- weekly_profit + daily_profit
+      total_units_all <- total_units_all + total_units_day
+
+      final_plan <- rbind(
+        final_plan,
+        data.frame(
+          city = cities[s],
+          horizon = city_data$horizon[d],
+          date = city_data$date[d],
+          forecasted_customers = C,
+
+          Juniors = J,
+          Experts = X,
+          PR_raw = PR,
+          Promotion = round(PR, 2),
+
+          Fj = Fj,
+          Fx = Fx,
+          W = city_data$W[d],
+          is_weekend = city_data$is_weekend[d],
+
+          assisted_customers = A,
+          customers_by_experts = cx,
+          customers_by_juniors = cj,
+
+          units_expert = Ux,
+          units_junior = Uj,
+
+          profit_client_expert = Px,
+          profit_client_junior = Pj,
+
+          total_units = total_units_day,
+          revenue = revenue,
+
+          cost_junior = cost_J,
+          cost_expert = cost_X,
+          hr_cost = hr_cost,
+
+          daily_profit = daily_profit,
+          total_hr = J + X
+        )
+      )
+    }
+
+    weekly_profit <- weekly_profit - city_data$W[1]
+    total_profit <- total_profit + weekly_profit
+  }
+
+  # O2 constraint
+
+  if(return_plan == FALSE) {
+    excess_units <- max(0, total_units_all - 10000)
+    
+    penalty <- 10000 * excess_units
+
+    return(total_profit - penalty)
+  }
+
+  if(return_plan == TRUE) {
+    return(final_plan)
+  }
+}
+```
+
+```{r}
+# Feasible Suggestions
+make_solution <- function(J_value, X_value, PR_value) {
+  c(
+    rep(J_value, n_stores * n_days),   # Juniors
+    rep(X_value, n_stores * n_days),   # Experts
+    rep(PR_value, n_stores * n_days)   # Promotions
+  )
+}
+
+suggestions <- rbind(
+  make_solution(0, 0, 0.00),
+  make_solution(1, 1, 0.00),
+  make_solution(2, 1, 0.00),
+  make_solution(2, 2, 0.00),
+  make_solution(3, 1, 0.00)
+)
+```
+
+
+```{r}
+# Lower / Upper Bounds
+lower <- c(
+  # J
+  rep(0, n_stores * n_days),
+
+  # X
+  rep(0, n_stores * n_days),
+
+  # PR
+  rep(0, n_stores * n_days)
+)
+
+upper <- c(
+  # J
+  rep(15, n_stores * n_days),
+
+  # X
+  rep(15, n_stores * n_days),
+
+  # PR
+  rep(0.30, n_stores * n_days)
+)
+```
+
+
+```{r}
+# Run Genetic Algorithm - O2
+
+set.seed(123)
+
+ga_result <- ga(
+  type = "real-valued",
+
+  fitness = evaluation,
+
+  lower = lower,
+  upper = upper,
+
+  suggestions = suggestions,
+
+  popSize = 100,
+  maxiter = 200,
+
+  run = 50,
+
+  pcrossover = 0.8,
+  pmutation = 0.1,
+
+  elitism = 5,
+
+  seed = 123
+)
+```
+
+```{r}
+# Best Solution
+best_solution <- ga_result@solution[1, ]
+
+best_profit <- evaluation(best_solution)
+
+cat("BEST WEEKLY PROFIT\n")
+cat(round(best_profit, 2), "\n")
+
+final_plan <- evaluation(
+  best_solution,
+  return_plan = TRUE
+)
+```
+
+```{r}
+store_summary <- final_plan %>%
+  group_by(city) %>%
+  summarise(
+    total_forecasted_customers = sum(forecasted_customers),
+    total_assisted_customers = sum(assisted_customers),
+    total_units = sum(total_units),
+
+    total_juniors = sum(Juniors),
+    total_experts = sum(Experts),
+    total_hr = sum(total_hr),
+
+    avg_promotion = round(mean(PR_raw), 3),
+
+    total_revenue = sum(revenue),
+    total_hr_cost = sum(hr_cost),
+    fixed_week_cost = first(W),
+
+    weekly_profit = sum(daily_profit) - first(W),
+
+    .groups = "drop"
+  )
+```
+
+```{r}
+sum_profit_from_plan <- sum(store_summary$weekly_profit)
+total_units <- sum(store_summary$total_units)
+
+cat("Profit from GA evaluation:", round(best_profit, 2), "\n")
+cat("Profit from final_plan   :", round(sum_profit_from_plan, 2), "\n")
+cat("Difference               :", round(best_profit - sum_profit_from_plan, 6), "\n\n")
+
+cat("Total units sold         :", round(total_units, 2), "\n")
+cat("Constraint limit         :", 10000, "\n")
+cat("Constraint satisfied?    :", ifelse(total_units <= 10000, "Yes", "No"), "\n")
+```
+
+```{r}
+# Save the results
+dir.create("results/O2", recursive = TRUE, showWarnings = FALSE)
+
+write.csv(
+  final_plan,
+  "results/O2/final_plan_O2.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  store_summary,
+  "results/O2/store_summary_O2.csv",
+  row.names = FALSE
+)
+
+final_metrics <- data.frame(
+  objective = "O2",
+  best_weekly_profit = best_profit,
+  total_units = total_units,
+  constraint_limit = 10000,
+  constraint_satisfied = total_units <= 10000,
+  population_size = ga_result@popSize,
+  generations = ga_result@iter,
+  maxiter = ga_result@maxiter,
+  run = ga_result@run,
+  pcrossover = ga_result@pcrossover,
+  pmutation = ga_result@pmutation,
+  elitism = ga_result@elitism
+)
+
+write.csv(
+  final_metrics,
+  "results/O2/GA_metrics_O2.csv",
+  row.names = FALSE
+)
+```
+
+```{r}
+# Clean GA Convergence Plot - O2
+# Best fitness only
+
+ga_summary <- as.data.frame(ga_result@summary)
+
+convergence_O2 <- data.frame(
+  generation = 1:nrow(ga_summary),
+  best_fitness = ga_summary$max
+)
+
+# Remove very negative penalized values from the plot
+convergence_O2$best_fitness_clean <- ifelse(
+  convergence_O2$best_fitness < -1e6,
+  NA,
+  convergence_O2$best_fitness
+)
+
+p_conv_O2 <- ggplot(convergence_O2, aes(x = generation, y = best_fitness_clean)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.5) +
+  labs(
+    title = "Genetic Algorithm Convergence - O2",
+    x = "Generation",
+    y = "Best Feasible Fitness"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    text = element_text(color = "black"),
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black"),
+    plot.title = element_text(color = "black", face = "bold")
+  )
+
+ggsave(
+  filename = "results/O2/GA_convergence_clean_O2.png",
+  plot = p_conv_O2,
+  width = 10,
+  height = 6,
+  dpi = 300,
+  bg = "white"
+)
+
+p_conv_O2
+```
+
+This **convergence plot** shows the evolution of the best feasible fitness value obtained by the Genetic Algorithm for O2. The fitness improves sharply during the first generations, indicating that the algorithm quickly finds feasible solutions that satisfy the 10,000 units constraint while increasing profit. After this initial improvement, the gains become smaller and the curve stabilizes near the end of the run, suggesting that the algorithm converged to a stable solution.
+
+The final feasible fitness is approximately 1,196, which corresponds to the best weekly profit found under the global units constraint. Compared with O1, the lower profit is expected because O2 imposes a stricter limitation on the total number of units that can be sold.
+
+```{r}
+# Units Sold by Store - O2
+
+p_units_store <- ggplot(store_summary, aes(x = city, y = total_units)) +
+  geom_col(width = 0.65) +
+  geom_text(
+    aes(label = round(total_units, 0)),
+    vjust = -0.3,
+    size = 4,
+    color = "black"
+  ) +
+  labs(
+    title = "Units Sold by Store - O2",
+    x = "Store",
+    y = "Units Sold"
+  ) +
+  ylim(0, max(store_summary$total_units) * 1.15) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    text = element_text(color = "black"),
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black"),
+    plot.title = element_text(color = "black", face = "bold"),
+    axis.text.x = element_text(angle = 25, hjust = 1, color = "black")
+  )
+
+ggsave(
+  filename = "results/O2/units_by_store_O2.png",
+  plot = p_units_store,
+  width = 10,
+  height = 6,
+  dpi = 300,
+  bg = "white"
+)
+
+p_units_store
+```
+
+This figure shows how the global limit of 10,000 sold units is distributed across the four stores under the optimized O2 solution. The constraint is fully used, with the total number of units sold reaching exactly 10,000. Richmond receives the largest share of sold units, followed by Philadelphia, Baltimore, and Lancaster.
+
+The distribution is not based only on forecasted demand. It also reflects the combined effect of staffing decisions, store productivity factors, promotion levels, and expected profit per assisted customer. Therefore, the Genetic Algorithm allocates the limited number of units to the stores where they contribute more effectively to the objective function while respecting the global constraint.
+
+```{r}
+# Weekly Profit by Store - O2
+
+p_profit <- ggplot(store_summary, aes(x = city, y = weekly_profit)) +
+  geom_col(width = 0.65) +
+  geom_text(
+    aes(label = round(weekly_profit, 0)),
+    vjust = -0.3,
+    size = 4,
+    color = "black"
+  ) +
+  labs(
+    title = "Weekly Profit by Store - O2",
+    x = "Store",
+    y = "Weekly Profit ($)"
+  ) +
+  ylim(0, max(store_summary$weekly_profit) * 1.15) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    text = element_text(color = "black"),
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black"),
+    plot.title = element_text(color = "black", face = "bold"),
+    axis.text.x = element_text(angle = 25, hjust = 1, color = "black")
+  )
+
+ggsave(
+  filename = "results/O2/profit_by_store_O2.png",
+  plot = p_profit,
+  width = 10,
+  height = 6,
+  dpi = 300,
+  bg = "white"
+)
+
+p_profit
+```
+
+This figure shows the weekly profit generated by each store under the optimized O2 solution. All stores remain profitable, but the profit values are substantially lower than in O1 due to the global constraint of 10,000 sold units. Richmond achieves the highest weekly profit, followed by Philadelphia, Baltimore, and Lancaster.
+
+The results indicate that, under the units limitation, the Genetic Algorithm prioritizes the allocation of sales capacity to stores where the restricted number of units can generate higher returns. This is consistent with the previous units distribution, where Richmond also received the largest share of sold units.
