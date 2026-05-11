@@ -1,0 +1,2 @@
+"best_weekly_profit","population_size","generations","maxiter","run","pcrossover","pmutation","elitism"
+11371,50,100,100,4,0.8,0.1,2
