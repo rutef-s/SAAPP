@@ -352,7 +352,7 @@ The **convergence plot** shows the evolution of the Genetic Algorithm during the
 ```{r}
 # Save image
 png(
-  filename = "results/GA_convergence_O1.png",
+  filename = "results/O1/GA_convergence_O1.png",
   width = 1200,
   height = 800,
   bg = "white"
@@ -377,13 +377,13 @@ dev.off()
 ```{r}
 write.csv(
   final_plan,
-  "results/final_plan_O1.csv",
+  "results/O1/final_plan_O1.csv",
   row.names = FALSE
 )
 
 write.csv(
   store_summary,
-  "results/store_summary_O1.csv",
+  "results/O1/store_summary_O1.csv",
   row.names = FALSE
 )
 
@@ -400,7 +400,7 @@ final_metrics <- data.frame(
 
 write.csv(
   final_metrics,
-  "results/GA_metrics_O1.csv",
+  "results/O1/GA_metrics_O1.csv",
   row.names = FALSE
 )
 ```
@@ -453,7 +453,7 @@ p_forecast_assisted <- ggplot(final_plan, aes(x = horizon)) +
   )
 
 ggsave(
-  filename = "results/forecasted_vs_assisted_O1.png",
+  filename = "results/O1/forecasted_vs_assisted_O1.png",
   plot = p_forecast_assisted,
   width = 12,
   height = 7,
@@ -510,7 +510,7 @@ p_hr <- ggplot(hr_long, aes(x = city, y = Total, fill = HR_type)) +
   )
 
 ggsave(
-  filename = "results/HR_allocation_O1.png",
+  filename = "results/O1/HR_allocation_O1.png",
   plot = p_hr,
   width = 10,
   height = 6,
@@ -553,7 +553,7 @@ p_profit <- ggplot(store_summary, aes(x = city, y = weekly_profit)) +
   )
 
 ggsave(
-  filename = "results/profit_by_store_O1.png",
+  filename = "results/O1/profit_by_store_O1.png",
   plot = p_profit,
   width = 10,
   height = 6,
