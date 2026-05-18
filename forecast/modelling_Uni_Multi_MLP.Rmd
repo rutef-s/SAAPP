@@ -10,17 +10,17 @@ library(rminer)
 
 ```{r}
 # Get Data
-baltimore_uni <- readRDS("data_clean/baltimore_uni.rds")
-baltimore_multi <- readRDS("data_clean/baltimore_multi.rds")
+baltimore_uni <- readRDS("../data_clean/baltimore_uni.rds")
+baltimore_multi <- readRDS("../data_clean/baltimore_multi.rds")
 
-lancaster_uni <- readRDS("data_clean/lancaster_uni.rds")
-lancaster_multi <- readRDS("data_clean/lancaster_multi.rds")
+lancaster_uni <- readRDS("../data_clean/lancaster_uni.rds")
+lancaster_multi <- readRDS("../data_clean/lancaster_multi.rds")
 
-philadelphia_uni <- readRDS("data_clean/philadelphia_uni.rds")
-philadelphia_multi <- readRDS("data_clean/philadelphia_multi.rds")
+philadelphia_uni <- readRDS("../data_clean/philadelphia_uni.rds")
+philadelphia_multi <- readRDS("../data_clean/philadelphia_multi.rds")
 
-richmond_uni <- readRDS("data_clean/richmond_uni.rds")
-richmond_multi <- readRDS("data_clean/richmond_multi.rds")
+richmond_uni <- readRDS("../data_clean/richmond_uni.rds")
+richmond_multi <- readRDS("../data_clean/richmond_multi.rds")
 ```
 
 
@@ -837,4 +837,23 @@ prev_multi_phil <- previsao_final_multi(philadelphia_multi, "Philadelphia",
 prev_multi_rich <- previsao_final_multi(richmond_multi, "Richmond",
                                          exo_cols=melhor_multi_rich$exo_cols,
                                          datas_futuras=datas_futuras)
+```
+
+```{r}
+# ── Guardar previsões MLP para o DSS ──────────────────────────────────────
+# Usa as previsões multivariadas (prev_multi_*) como "best"
+# Se preferires as univariadas, substitui por prev_balt, prev_lanc, etc.
+
+dir.create("forecasts", showWarnings = FALSE)
+
+df_forecasts_mlp <- rbind(
+  data.frame(store="baltimore",    date=as.character(datas_futuras), forecast=prev_multi_balt),
+  data.frame(store="lancaster",    date=as.character(datas_futuras), forecast=prev_multi_lanc),
+  data.frame(store="philadelphia", date=as.character(datas_futuras), forecast=prev_multi_phil),
+  data.frame(store="richmond",     date=as.character(datas_futuras), forecast=prev_multi_rich)
+)
+
+write.csv(df_forecasts_mlp, "forecasts/forecasts_mlp.csv", row.names=FALSE)
+cat("✓ Forecasts MLP guardados em forecasts/forecasts_mlp.csv\n")
+print(df_forecasts_mlp)
 ```
