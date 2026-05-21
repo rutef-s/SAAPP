@@ -792,7 +792,482 @@ export_plan <- function(opt_result, week_info) {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 9.  MAIN LOOP
+# 9.  DATA ANALYSIS  (Exploratory Data Analysis — adapted from eda_dataPreparation)
+# ─────────────────────────────────────────────────────────────────────────────
+
+.eda_pause <- function() {
+  ask("\n  Press ENTER for next plot (or 'q' to return to menu): ")
+}
+
+# ── Análise 1 — Time Series Overview ─────────────────────────────────────
+eda_time_series <- function(data_list) {
+  cat("\n  [1/8] Time Series — Num_Customers (all stores)\n")
+  op <- par(mfrow = c(2, 2), mar = c(4, 4, 3, 1))
+  on.exit(par(op))
+  for (st in STORES) {
+    d <- data_list[[st]]
+    if (is.null(d)) next
+    plot(d$Date, d$Num_Customers, type = "l", col = "steelblue",
+         main = toupper(st), xlab = "Date", ylab = "Customers")
+  }
+}
+
+# ── Análise 2 — Weekly Pattern (Boxplot por dia da semana) ───────────────
+eda_weekly_pattern <- function(data_list) {
+  cat("\n  [2/8] Weekly Pattern — Customers by Day of Week\n")
+  op <- par(mfrow = c(2, 2), mar = c(4, 4, 3, 1))
+  on.exit(par(op))
+  
+  # Nomes em inglês fixos — não dependem da locale do sistema
+  day_labels <- c("Sun","Mon","Tue","Wed","Thu","Fri","Sat")
+  
+  for (st in STORES) {
+    d <- data_list[[st]]
+    if (is.null(d)) next
+    
+    # POSIXlt$wday devolve 0=Domingo até 6=Sábado, idêntico em qualquer locale
+    dow_num <- as.POSIXlt(d$Date)$wday
+    d$dow   <- factor(day_labels[dow_num + 1], levels = day_labels)
+    
+    boxplot(Num_Customers ~ dow, data = d, col = "lightblue",
+            main = toupper(st), xlab = "", ylab = "Customers",
+            cex.axis = 0.9, las = 1)
+  }
+}
+
+# ── Análise 3 — Tourist Event Impact ─────────────────────────────────────
+eda_tourist_event <- function(data_list) {
+  cat("\n  [3/8] Tourist Event Impact — Customers ~ TouristEvent\n")
+  op <- par(mfrow = c(2, 2), mar = c(4, 4, 3, 1))
+  on.exit(par(op))
+  for (st in STORES) {
+    d <- data_list[[st]]
+    if (is.null(d) || !"TouristEvent" %in% names(d)) next
+    boxplot(Num_Customers ~ TouristEvent, data = d,
+            col = c("lightgray", "tomato"),
+            main = toupper(st), xlab = "TouristEvent", ylab = "Customers")
+  }
+}
+
+# ── Análise 4 — Distribution Histograms ──────────────────────────────────
+eda_distribution <- function(data_list) {
+  cat("\n  [4/8] Distribution of Num_Customers\n")
+  op <- par(mfrow = c(2, 2), mar = c(4, 4, 3, 1))
+  on.exit(par(op))
+  for (st in STORES) {
+    d <- data_list[[st]]
+    if (is.null(d)) next
+    hist(d$Num_Customers, breaks = 40, col = "steelblue", border = "white",
+         main = toupper(st), xlab = "Num_Customers")
+    abline(v = median(d$Num_Customers, na.rm = TRUE),
+           col = "red", lwd = 2, lty = 2)
+  }
+}
+
+# ── Análise 5 — Customers vs Sales Scatter ───────────────────────────────
+eda_customers_vs_sales <- function(data_list) {
+  cat("\n  [5/8] Customers vs Sales\n")
+  op <- par(mfrow = c(2, 2), mar = c(4, 4, 3, 1))
+  on.exit(par(op))
+  for (st in STORES) {
+    d <- data_list[[st]]
+    if (is.null(d) || !"Sales" %in% names(d)) next
+    cor_val <- cor(d$Num_Customers, d$Sales, use = "complete.obs")
+    plot(d$Num_Customers, d$Sales, pch = 19, col = rgb(0, 0, 1, 0.3),
+         main = sprintf("%s (cor = %.2f)", toupper(st), cor_val),
+         xlab = "Customers", ylab = "Sales")
+  }
+}
+
+# ── Análise 6 — Autocorrelation (ACF) ────────────────────────────────────
+eda_acf <- function(data_list) {
+  cat("\n  [6/8] Autocorrelation (ACF) — weekly seasonality at lags 7, 14, 21, 28\n")
+  op <- par(mfrow = c(2, 2), mar = c(4, 4, 3, 1))
+  on.exit(par(op))
+  for (st in STORES) {
+    d <- data_list[[st]]
+    if (is.null(d)) next
+    acf(d$Num_Customers, lag.max = 35, main = toupper(st))
+  }
+}
+
+# ── Análise 7 — CCF: Promotions → Customers ──────────────────────────────
+eda_ccf_promotions <- function(data_list) {
+  cat("\n  [7/8] Cross-Correlation — Pct_On_Sale vs Num_Customers\n")
+  op <- par(mfrow = c(2, 2), mar = c(4, 4, 3, 1))
+  on.exit(par(op))
+  for (st in STORES) {
+    d <- data_list[[st]]
+    if (is.null(d) || !"Pct_On_Sale" %in% names(d)) next
+    valid <- complete.cases(d$Pct_On_Sale, d$Num_Customers)
+    ccf(d$Pct_On_Sale[valid], d$Num_Customers[valid],
+        lag.max = 14, main = toupper(st))
+  }
+}
+
+# ── Análise 8 — CCF: Sales → Customers ───────────────────────────────────
+eda_ccf_sales <- function(data_list) {
+  cat("\n  [8/8] Cross-Correlation — Sales (differenced) vs Num_Customers\n")
+  op <- par(mfrow = c(2, 2), mar = c(4, 4, 3, 1))
+  on.exit(par(op))
+  for (st in STORES) {
+    d <- data_list[[st]]
+    if (is.null(d) || !"Sales" %in% names(d)) next
+    valid <- complete.cases(d$Sales, d$Num_Customers)
+    ccf(diff(d$Sales[valid]), diff(d$Num_Customers[valid]),
+        lag.max = 28, main = toupper(st))
+  }
+}
+
+# ── Análise extra — Summary Statistics (texto, sem gráfico) ──────────────
+eda_summary_stats <- function(data_list) {
+  cat("\n  Summary Statistics — Num_Customers per store\n")
+  cat("  ────────────────────────────────────────────────────────────\n")
+  cat(sprintf("  %-14s %6s %6s %6s %6s %6s %6s\n",
+              "Store", "Min", "Q1", "Median", "Mean", "Q3", "Max"))
+  cat("  ────────────────────────────────────────────────────────────\n")
+  for (st in STORES) {
+    d <- data_list[[st]]
+    if (is.null(d)) next
+    s <- summary(d$Num_Customers)
+    cat(sprintf("  %-14s %6.0f %6.0f %6.0f %6.0f %6.0f %6.0f\n",
+                toupper(st), s["Min."], s["1st Qu."], s["Median"],
+                s["Mean"], s["3rd Qu."], s["Max."]))
+  }
+  cat("  ────────────────────────────────────────────────────────────\n")
+}
+
+# ── Menu da Data Analysis ────────────────────────────────────────────────
+run_data_analysis <- function(data_list) {
+  
+  analyses <- list(
+    list(label = "Time Series Overview",         fn = eda_time_series),
+    list(label = "Weekly Pattern (by Weekday)",  fn = eda_weekly_pattern),
+    list(label = "Tourist Event Impact",         fn = eda_tourist_event),
+    list(label = "Distribution Histograms",      fn = eda_distribution),
+    list(label = "Customers vs Sales",           fn = eda_customers_vs_sales),
+    list(label = "Autocorrelation (ACF)",        fn = eda_acf),
+    list(label = "CCF: Promotions → Customers", fn = eda_ccf_promotions),
+    list(label = "CCF: Sales → Customers",      fn = eda_ccf_sales)
+  )
+  
+  repeat {
+    cat("\n")
+    cat("╔══════════════════════════════════════════════════════════════╗\n")
+    cat("║              DATA ANALYSIS                                  ║\n")
+    cat("╚══════════════════════════════════════════════════════════════╝\n")
+    for (i in seq_along(analyses)) {
+      cat(sprintf("    [%d] %s\n", i, analyses[[i]]$label))
+    }
+    cat("    [S] Summary statistics (text only)\n")
+    cat("    [A] Show ALL analyses sequentially\n")
+    cat("    [B] Back to main menu\n")
+    cat("──────────────────────────────────────────────────────────────\n")
+    
+    choice <- ask("  Choice: ")
+    choice_upper <- toupper(choice)
+    
+    if (choice_upper == "B" || choice == "") return(invisible(NULL))
+    
+    if (choice_upper == "S") {
+      eda_summary_stats(data_list)
+      next
+    }
+    
+    if (choice_upper == "A") {
+      eda_summary_stats(data_list)
+      for (a in analyses) {
+        tryCatch(a$fn(data_list),
+                 error = function(e) cat("[ERROR]", conditionMessage(e), "\n"))
+        ans <- ask("  Press ENTER for next (or 'q' to stop): ")
+        if (tolower(ans) == "q") break
+      }
+      next
+    }
+    
+    idx <- suppressWarnings(as.integer(choice))
+    if (!is.na(idx) && idx >= 1 && idx <= length(analyses)) {
+      tryCatch(analyses[[idx]]$fn(data_list),
+               error = function(e) cat("[ERROR]", conditionMessage(e), "\n"))
+    } else {
+      cat("  Invalid choice.\n")
+    }
+  }
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10.  PARETO FRONTIER FOR O3  (Hill Climbing weights vs NSGA-II + Hypervolume)
+# ─────────────────────────────────────────────────────────────────────────────
+show_pareto_O3 <- function(week_info,
+                           iters_hc         = 500,
+                           nsga_popsize     = 40,
+                           nsga_generations = 50) {
+  
+  if (!requireNamespace("mco", quietly = TRUE)) {
+    cat("\n  [INFO] A instalar pacote 'mco' para NSGA-II...\n")
+    install.packages("mco", quiet = TRUE)
+  }
+  library(mco)
+  
+  preds_by_store <- week_info$preds_by_store
+  bnd   <- calc_bounds(preds_by_store)
+  lower <- bnd$lower
+  upper <- bnd$upper
+  
+  # ════════════════════════════════════════════════════════════════════════
+  # MÉTODO 1 — Hill Climbing com 9 pesos
+  # ════════════════════════════════════════════════════════════════════════
+  cat("\n  [Method 1/2] Hill Climbing with 9 weights\n")
+  cat("    Estimating normalisation constants...\n")
+  normC <- estimate_norm_constants(preds_by_store, lower, upper, n = 150)
+  
+  weights <- c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
+  hc_results <- data.frame(w = weights, hr = NA_real_, profit = NA_real_)
+  
+  for (i in seq_along(weights)) {
+    w <- weights[i]
+    cat(sprintf("    [%d/%d] w=%.2f ...\n", i, length(weights), w))
+    
+    fn <- function(s) obj_O3(s, preds_by_store, lower, upper, normC, w = w)
+    hc <- hill_climb(fn, lower, upper, iters = iters_hc,
+                     verbose = FALSE, seed = 100 + i)
+    
+    dec <- decode_solution(hc$s_repaired)
+    dec$J  <- pmax(0, round(dec$J))
+    dec$X  <- pmax(0, round(dec$X))
+    dec$PR <- pmax(0, pmin(0.30, dec$PR))
+    s_final <- encode_solution(dec$J, dec$X, dec$PR)
+    s_final <- repair_O2(s_final, preds_by_store, upper)
+    
+    metrics <- eval_allstores(s_final, preds_by_store)
+    hc_results$hr[i]     <- as.numeric(metrics["hr"])
+    hc_results$profit[i] <- as.numeric(metrics["profit"])
+  }
+  
+  # filtrar não-dominados
+  is_dominated <- function(p, others) {
+    any(others$hr <= p$hr & others$profit >= p$profit &
+          (others$hr <  p$hr | others$profit >  p$profit))
+  }
+  keep_hc <- !sapply(seq_len(nrow(hc_results)),
+                     function(i) is_dominated(hc_results[i,], hc_results[-i,]))
+  hc_pareto <- hc_results[keep_hc, ]
+  hc_pareto <- hc_pareto[hc_pareto$profit > 0, ]   # só profit positivo
+  hc_pareto <- hc_pareto[order(hc_pareto$hr), ]
+  
+  # ════════════════════════════════════════════════════════════════════════
+  # MÉTODO 2 — NSGA-II
+  # ════════════════════════════════════════════════════════════════════════
+  cat(sprintf("\n  [Method 2/2] NSGA-II (popsize=%d, generations=%d)\n",
+              nsga_popsize, nsga_generations))
+  
+  fn_nsga <- function(s) {
+    s <- pmin(pmax(s, lower), upper)
+    s <- repair_O2(s, preds_by_store, upper)
+    v <- eval_allstores(s, preds_by_store)
+    c(-as.numeric(v["profit"]), as.numeric(v["hr"]))
+  }
+  
+  set.seed(123)
+  nsga_res <- mco::nsga2(
+    fn           = fn_nsga,
+    idim         = length(lower),
+    odim         = 2,
+    lower.bounds = lower,
+    upper.bounds = upper,
+    popsize      = nsga_popsize,
+    generations  = nsga_generations
+  )
+  
+  if (is.list(nsga_res) && !is.null(nsga_res$value)) {
+    final_gen <- nsga_res
+  } else {
+    final_gen <- nsga_res[[length(nsga_res)]]
+  }
+  
+  pareto_idx  <- which(final_gen$pareto.optimal)
+  nsga_pareto <- data.frame(
+    hr     = final_gen$value[pareto_idx, 2],
+    profit = -final_gen$value[pareto_idx, 1]
+  )
+  nsga_pareto <- nsga_pareto[nsga_pareto$profit > 0, ]   # só profit positivo
+  nsga_pareto <- nsga_pareto[order(nsga_pareto$hr), ]
+  
+  # ════════════════════════════════════════════════════════════════════════
+  # PONTO DE REFERÊNCIA (NADIR) para hipervolume
+  # ════════════════════════════════════════════════════════════════════════
+  # Para maximização: (max(HR), 0)  → o "pior caso" possível
+  all_hr     <- c(nsga_pareto$hr,     hc_pareto$hr)
+  all_profit <- c(nsga_pareto$profit, hc_pareto$profit)
+  
+  ref_hr     <- max(all_hr) * 1.05   # pior HR + 5%
+  ref_profit <- 0                     # profit mínimo aceitável
+  
+  # ── cálculo do hipervolume (área dominada acima do ponto de referência) ──
+  hv <- function(pareto) {
+    if (nrow(pareto) == 0) return(0)
+    p <- pareto[order(pareto$hr), ]
+    area <- 0
+    prev_hr <- ref_hr
+    for (i in seq_len(nrow(p))) {
+      area <- area + (prev_hr - p$hr[i]) * (p$profit[i] - ref_profit)
+      prev_hr <- p$hr[i]
+    }
+    max(0, area)
+  }
+  
+  hv_nsga    <- hv(nsga_pareto)
+  hv_weights <- hv(hc_pareto)
+  
+
+  # ════════════════════════════════════════════════════════════════════════
+  # PLOT — estático (base R) + interativo (plotly)
+  # ════════════════════════════════════════════════════════════════════════
+  op <- par(mar = c(5, 5, 4, 2))
+  on.exit(par(op))
+  
+  x_all <- c(nsga_pareto$hr, hc_pareto$hr, ref_hr)
+  y_all <- c(nsga_pareto$profit, hc_pareto$profit, ref_profit)
+  
+  # ── plot estático no painel Plots ────────────────────────────────────────
+  plot(nsga_pareto$hr, nsga_pareto$profit,
+       xlab = "Total HR (person-days)",
+       ylab = "Total weekly profit ($)",
+       main = sprintf("O3 — NSGA-II vs Weights | HV NSGA-II= %.0f | HV Weights= %.0f",
+                      hv_nsga, hv_weights),
+       pch  = 19, col = "black", cex = 0.9,
+       xlim = range(x_all) * c(0.95, 1.05),
+       ylim = c(0, max(y_all) * 1.15))
+  
+  if (nrow(nsga_pareto) >= 2)
+    lines(nsga_pareto$hr, nsga_pareto$profit, col = "black", lwd = 2)
+  points(hc_pareto$hr, hc_pareto$profit,
+         pch = 5, col = "red", lwd = 3, cex = 1.3)
+  if (nrow(hc_pareto) >= 2)
+    lines(hc_pareto$hr, hc_pareto$profit, col = "red", lwd = 2)
+  
+  abline(v = ref_hr,     col = "gray", lty = 2)
+  abline(h = ref_profit, col = "gray", lty = 2)
+  points(ref_hr, ref_profit, col = "gray30", pch = 4, cex = 1.5, lwd = 2)
+  
+  legend("bottomright",
+         legend = c(sprintf("NSGA-II Pareto (%d pts)",        nrow(nsga_pareto)),
+                    sprintf("Hill Climbing weights (%d pts)", nrow(hc_pareto)),
+                    "Reference point (nadir)"),
+         col    = c("black", "red", "gray30"),
+         pch    = c(19, 5, 4),
+         lwd    = c(2, 2, NA),
+         bty    = "n")
+  
+  # ── plot interativo (plotly) ─────────────────────────────────────────────
+  show_interactive <- ask("\n  Show interactive Pareto plot with hover? [y/N]: ")
+  if (tolower(show_interactive) == "y") {
+    
+    if (!requireNamespace("plotly", quietly = TRUE)) {
+      cat("  [INFO] A instalar pacote 'plotly'...\n")
+      install.packages("plotly", quiet = TRUE)
+    }
+    library(plotly)
+    
+    p <- plot_ly() %>%
+      add_trace(
+        data = nsga_pareto,
+        x = ~hr, y = ~profit,
+        type = "scatter", mode = "lines+markers",
+        name = sprintf("NSGA-II Pareto (%d pts)", nrow(nsga_pareto)),
+        line   = list(color = "black", width = 2),
+        marker = list(color = "black", size = 8),
+        hovertemplate = paste(
+          "<b>NSGA-II</b><br>",
+          "HR: %{x:.0f} person-days<br>",
+          "Profit: $%{y:.0f}<extra></extra>"
+        )
+      ) %>%
+      add_trace(
+        data = hc_pareto,
+        x = ~hr, y = ~profit,
+        type = "scatter", mode = "lines+markers",
+        name = sprintf("Hill Climbing weights (%d pts)", nrow(hc_pareto)),
+        line   = list(color = "red", width = 2),
+        marker = list(color = "red", size = 12, symbol = "diamond-open",
+                      line = list(width = 2)),
+        text   = ~sprintf("w = %.2f", w),
+        hovertemplate = paste(
+          "<b>Hill Climbing</b><br>",
+          "%{text}<br>",
+          "HR: %{x:.0f} person-days<br>",
+          "Profit: $%{y:.0f}<extra></extra>"
+        )
+      ) %>%
+      add_trace(
+        x = ref_hr, y = ref_profit,
+        type = "scatter", mode = "markers",
+        name = "Reference point (nadir)",
+        marker = list(color = "gray30", size = 14, symbol = "x",
+                      line = list(width = 3)),
+        hovertemplate = paste(
+          "<b>Nadir point</b><br>",
+          "HR: %{x:.0f}<br>",
+          "Profit: $%{y:.0f}<extra></extra>"
+        )
+      ) %>%
+      layout(
+        title = list(
+          text = sprintf("O3 — Pareto Frontier<br><sub>HV NSGA-II=%.0f | HV Weights=%.0f</sub>",
+                         hv_nsga, hv_weights)
+        ),
+        xaxis = list(title = "Total HR (person-days)",
+                     zeroline = FALSE,
+                     showline = TRUE),
+        yaxis = list(title = "Total weekly profit ($)",
+                     zeroline = TRUE,
+                     showline = TRUE),
+        hovermode = "closest",
+        shapes = list(
+          list(type = "line", x0 = ref_hr, x1 = ref_hr,
+               y0 = 0, y1 = max(y_all) * 1.15,
+               line = list(color = "gray", dash = "dash", width = 1)),
+          list(type = "line", x0 = min(x_all) * 0.95, x1 = max(x_all) * 1.05,
+               y0 = ref_profit, y1 = ref_profit,
+               line = list(color = "gray", dash = "dash", width = 1))
+        ),
+        legend = list(x = 0.02, y = 0.98, bgcolor = "rgba(255,255,255,0.7)")
+      )
+    
+    print(p)
+    cat("  Interactive plot opened in Viewer panel.\n")
+  }
+  
+  # ════════════════════════════════════════════════════════════════════════
+  # Tabela resumo
+  # ════════════════════════════════════════════════════════════════════════
+  cat("\n  ─────────────────────────────────────────────\n")
+  cat(sprintf("  Reference point (nadir): HR=%.0f, Profit=%.0f\n", ref_hr, ref_profit))
+  cat(sprintf("  Hypervolume NSGA-II : %.0f\n", hv_nsga))
+  cat(sprintf("  Hypervolume Weights : %.0f\n", hv_weights))
+  cat("  ─────────────────────────────────────────────\n")
+  
+  cat("\n  NSGA-II Pareto front (profit > 0):\n")
+  cat(sprintf("  %10s %12s\n", "HR", "Profit($)"))
+  for (i in seq_len(nrow(nsga_pareto))) {
+    cat(sprintf("  %10.0f %12.0f\n", nsga_pareto$hr[i], nsga_pareto$profit[i]))
+  }
+  
+  cat("\n  Hill Climbing weights Pareto front (profit > 0):\n")
+  cat(sprintf("  %-6s %10s %12s\n", "w", "HR", "Profit($)"))
+  for (i in seq_len(nrow(hc_pareto))) {
+    cat(sprintf("  %-6.2f %10.0f %12.0f\n",
+                hc_pareto$w[i], hc_pareto$hr[i], hc_pareto$profit[i]))
+  }
+  cat("  ─────────────────────────────────────────────\n")
+  
+  invisible(list(nsga = nsga_pareto, hc_weights = hc_pareto,
+                 hv_nsga = hv_nsga, hv_weights = hv_weights,
+                 ref_point = c(hr = ref_hr, profit = ref_profit)))
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 11. MAIN LOOP
 # ─────────────────────────────────────────────────────────────────────────────
 main <- function() {
   cat("\n")
@@ -801,15 +1276,12 @@ main <- function() {
   cat("║  Forecasting + Optimization  (console mode)                 ║\n")
   cat("╚══════════════════════════════════════════════════════════════╝\n\n")
   
-  # load data once
   cat("  Loading store data...\n")
   data_list <- load_all_stores()
   
   loaded <- sapply(data_list, function(x) !is.null(x))
   if (!any(loaded)) {
-    cat("\n[ERROR] No CSV files found. Please place baltimore.csv, lancaster.csv,\n")
-    cat("        philadelphia.csv, richmond.csv in the working directory or data/ subfolder.\n")
-    cat("  Current working directory:", getwd(), "\n")
+    cat("\n[ERROR] No CSV files found.\n")
     return(invisible(NULL))
   }
   
@@ -821,52 +1293,50 @@ main <- function() {
     cat("  MAIN MENU\n")
     cat("    [1] Run DSS  (select week + forecast + optimize + plan)\n")
     cat("    [2] Show forecasts only\n")
+    cat("    [3] Data Analysis  (exploratory plots)\n")
     cat("    [Q] Quit\n")
     cat("──────────────────────────────────────────────────────────────\n")
     
     choice <- ask("  Choice: ")
     
     if (toupper(choice) == "Q") {
-      cat("\n  Goodbye!\n\n")
-      break
+      cat("\n  Goodbye!\n\n"); break
     }
     
-    if (choice %in% c("1","2")) {
-      
-      # select week
-      week_info <- tryCatch(
-        select_week(data_list),
-        error = function(e) { cat("[ERROR]", conditionMessage(e), "\n"); NULL }
-      )
+    if (choice == "1" || choice == "2") {
+      week_info <- tryCatch(select_week(data_list),
+                            error = function(e) { cat("[ERROR]", conditionMessage(e), "\n"); NULL })
       if (is.null(week_info)) next
       
-      # show forecasts
       show_forecasts(week_info)
+      if (choice == "2") next
       
-      if (choice == "2") next   # forecasts only — loop back
-      
-      # run optimization
-      opt <- tryCatch(
-        run_optimization(week_info),
-        error = function(e) { cat("[ERROR]", conditionMessage(e), "\n"); NULL }
-      )
+      opt <- tryCatch(run_optimization(week_info),
+                      error = function(e) { cat("[ERROR]", conditionMessage(e), "\n"); NULL })
       if (is.null(opt)) next
       
-      # show plan
       show_plan(opt, week_info)
       
-      # optional export
+      # ── Pareto frontier (só para O3) ──────────────────────────────────
+      if (opt$obj == "3") {
+        ans <- ask("\n  Show Pareto frontier for O3? [y/N]: ")
+        if (tolower(ans) == "y") {
+          tryCatch(show_pareto_O3(week_info),
+                   error = function(e) cat("[ERROR]", conditionMessage(e), "\n"))
+        }
+      }
+      
       export_plan(opt, week_info)
       
+    } else if (choice == "3") {
+      run_data_analysis(data_list)
+      
     } else {
-      cat("  Invalid choice. Please enter 1, 2 or Q.\n")
+      cat("  Invalid choice.\n")
     }
   }
   
   invisible(NULL)
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Entry point
-# ─────────────────────────────────────────────────────────────────────────────
 main()
