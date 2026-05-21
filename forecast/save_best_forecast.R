@@ -14,7 +14,7 @@
 #    forecasts/comparison_summary.csv ← tabela comparativa dos 3 modelos
 # =============================================================================
 
-dir.create("forecasts", showWarnings = FALSE)
+
 
 STORES <- c("baltimore", "lancaster", "philadelphia", "richmond")
 
@@ -25,7 +25,9 @@ load_actual <- function(store_name) {
   candidates <- c(
     paste0(store_name, ".csv"),
     paste0("data/", store_name, ".csv"),
-    paste0("data_clean/", store_name, ".csv")
+    paste0("data_clean/", store_name, ".csv"),
+    paste0("SAAPP/data/", store_name, ".csv"),
+    paste0("SAAPP/data_clean/", store_name, ".csv")
   )
   for (p in candidates) {
     if (file.exists(p)) {
@@ -49,9 +51,9 @@ calc_nmae <- function(actual, predicted) {
 # 2.  Carregar os 3 ficheiros de previsões
 # ─────────────────────────────────────────────────────────────────────────────
 model_files <- list(
-  MLP    = "forecasts/forecasts_mlp.csv",
-  XGBoost = "forecasts/forecasts_xgb.csv",
-  ARIMAX = "forecasts/forecasts_arimax.csv"
+  MLP    = "SAAPP/forecast/forecasts/forecasts_mlp.csv",
+  XGBoost = "SAAPP/forecast/forecasts/forecasts_xgb.csv",
+  ARIMAX = "SAAPP/forecast/forecasts/forecasts_arimax.csv"
 )
 
 forecasts <- list()
@@ -137,7 +139,7 @@ for (m in names(sort(avg_nmae))) {
   cat(sprintf("    %-10s : %.2f%%\n", m, avg_nmae[m]))
 }
 
-write.csv(comparison_df, "forecasts/comparison_summary.csv", row.names = FALSE)
+write.csv(comparison_df, "SAAPP/forecast/forecasts/comparison_summary.csv", row.names = FALSE)
 cat("\n  Tabela guardada em forecasts/comparison_summary.csv\n")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -196,8 +198,12 @@ out_df <- best_df[, c("store", "date", "forecast")]
 out_df  <- out_df[order(out_df$store, out_df$date), ]
 rownames(out_df) <- NULL
 
-write.csv(out_df, "forecasts/forecasts_best.csv", row.names = FALSE)
+write.csv(out_df, "SAAPP/forecast/forecasts/forecasts_best.csv", row.names = FALSE)
+
 
 cat("\n✓ forecasts/forecasts_best.csv guardado com os melhores forecasts por loja:\n")
 print(out_df)
 cat("\n  O DSS irá usar automaticamente este ficheiro (opção [3]).\n")
+
+
+list.files(pattern = "forecasts_best.csv", recursive = TRUE)
