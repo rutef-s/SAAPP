@@ -819,9 +819,8 @@ main <- function() {
     cat("\n")
     cat("──────────────────────────────────────────────────────────────\n")
     cat("  MAIN MENU\n")
-    cat("    [1] Select week & run full DSS  (forecast + optimize + plan)\n")
+    cat("    [1] Run DSS  (select week + forecast + optimize + plan)\n")
     cat("    [2] Show forecasts only\n")
-    cat("    [3] Optimize current week with different objective\n")
     cat("    [Q] Quit\n")
     cat("──────────────────────────────────────────────────────────────\n")
     
@@ -832,9 +831,9 @@ main <- function() {
       break
     }
     
-    if (choice %in% c("1","2","3")) {
+    if (choice %in% c("1","2")) {
       
-      # select week (always)
+      # select week
       week_info <- tryCatch(
         select_week(data_list),
         error = function(e) { cat("[ERROR]", conditionMessage(e), "\n"); NULL }
@@ -860,7 +859,7 @@ main <- function() {
       export_plan(opt, week_info)
       
     } else {
-      cat("  Invalid choice. Please enter 1, 2, 3 or Q.\n")
+      cat("  Invalid choice. Please enter 1, 2 or Q.\n")
     }
   }
   
