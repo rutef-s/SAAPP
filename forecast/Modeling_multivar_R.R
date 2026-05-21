@@ -296,11 +296,13 @@ select_best_global <- function(summary_df) {
 # 7) Ficheiros
 # =========================================================
 files_multi <- c(
-  "data_clean/baltimore_multi.rds",
-  "data_clean/lancaster_multi.rds",
-  "data_clean/philadelphia_multi.rds",
-  "data_clean/richmond_multi.rds"
+  "SAAPP/data_clean/baltimore_multi.rds",
+  "SAAPP/data_clean/lancaster_multi.rds",
+  "SAAPP/data_clean/philadelphia_multi.rds",
+  "SAAPP/data_clean/richmond_multi.rds"
 )
+
+list.files(pattern = "baltimore_multi.rds", recursive = TRUE)
 
 # =========================================================
 # 8) Configurações ARIMAX
@@ -370,31 +372,31 @@ best_global <- best_global_out$best
 # =========================================================
 write.csv(
   summary_final_all,
-  "data/arimax_summary_median_by_store_model.csv",
+  "SAAPP/data/arimax_summary_median_by_store_model.csv",
   row.names = FALSE
 )
 
 write.csv(
   predictions_final_all,
-  "data/arimax_predictions_detailed.csv",
+  "SAAPP/data/arimax_predictions_detailed.csv",
   row.names = FALSE
 )
 
 write.csv(
   iter_metrics_final_all,
-  "data/arimax_iter_metrics_detailed.csv",
+  "SAAPP/data/arimax_iter_metrics_detailed.csv",
   row.names = FALSE
 )
 
 write.csv(
   best_by_store,
-  "data/arimax_best_config_by_store.csv",
+  "SAAPP/data/arimax_best_config_by_store.csv",
   row.names = FALSE
 )
 
 write.csv(
   global_ranking,
-  "data/arimax_global_config_ranking.csv",
+  "SAAPP/data/arimax_global_config_ranking.csv",
   row.names = FALSE
 )
 
@@ -412,3 +414,51 @@ print(global_ranking)
 
 cat("\n--- Melhor ARIMAX global ---\n")
 print(best_global)
+
+# =========================================================
+# 13) Guardar previsões ARIMAX para o DSS
+# =========================================================
+# predictions_final_all tem: Store, Iter, Model, Config, Date, Real, Pred
+# best_by_store      tem: Store, Config, NMAE_median, RMSE_median, ...
+#
+# Para cada loja usa-se a melhor config + última iteração (janela mais
+# recente com 7 datas consecutivas) — formato compatível com DSS.R
+
+dir.create("SAAPP//forecast/forecasts", showWarnings = FALSE)
+
+build_store_forecast_arimax <- function(store_full) {
+  # melhor config para esta loja
+  best_cfg <- best_by_store$Config[best_by_store$Store == store_full]
+  if (length(best_cfg) == 0) best_cfg <- best_global$Config
+  
+  # filtrar predições desta loja com a melhor config
+  df <- predictions_final_all[
+    predictions_final_all$Store  == store_full &
+      predictions_final_all$Config == best_cfg,
+  ]
+  
+  # última iteração (janela mais recente, 7 dias consecutivos)
+  last_iter <- max(df$Iter)
+  df <- df[df$Iter == last_iter, ]
+  df <- df[order(df$Date), ]
+  
+  # Pós-processamento (não-negativo, inteiro)
+  preds <- pmax(0, round(df$Pred))
+  
+  data.frame(
+    store    = sub("_multi$", "", store_full),
+    date     = as.character(df$Date),
+    forecast = preds
+  )
+}
+
+df_forecasts_arimax <- rbind(
+  build_store_forecast_arimax("baltimore_multi"),
+  build_store_forecast_arimax("lancaster_multi"),
+  build_store_forecast_arimax("philadelphia_multi"),
+  build_store_forecast_arimax("richmond_multi")
+)
+
+write.csv(df_forecasts_arimax, "SAAPP/forecast/forecasts/forecasts_arimax.csv", row.names = FALSE)
+cat("\n✓ Forecasts ARIMAX guardados em forecast/forecasts/forecasts_arimax.csv\n")
+print(df_forecasts_arimax)
