@@ -15,13 +15,13 @@ library(dplyr)
 
 ```{r}
 # Get Date
-baltimore_multi <- readRDS("data_clean/baltimore_multi.rds")
+baltimore_multi <- readRDS("../data_clean/baltimore_multi.rds")
 
-lancaster_multi <- readRDS("data_clean/lancaster_multi.rds")
+lancaster_multi <- readRDS("../data_clean/lancaster_multi.rds")
 
-philadelphia_multi <- readRDS("data_clean/philadelphia_multi.rds")
+philadelphia_multi <- readRDS("../data_clean/philadelphia_multi.rds")
 
-richmond_multi <- readRDS("data_clean/richmond_multi.rds")
+richmond_multi <- readRDS("../data_clean/richmond_multi.rds")
 ```
 
 ```{r}
@@ -337,7 +337,67 @@ final_forecast <- best_predictions %>%
 
 ```{r}
 # Save Final Forecast data for optimization
-saveRDS(final_forecast, "optimization_data/forecasting.rds")
+saveRDS(final_forecast, "../optimization_data/forecasting.rds")
 ```
+
+
+
+```{r}
+# ─────────────────────────────────────────────────────────────────────────
+# Guardar previsões XGBoost para o DSS
+# Treina UM modelo final com df[1:(N-7)] e prevê os últimos 7 dias
+# Coincide com MLP e ARIMAX para fazermos a comparação no save_best_forecast.r
+# ─────────────────────────────────────────────────────────────────────────
+
+dir.create("forecasts", showWarnings = FALSE)
+
+predict_last_week_xgb <- function(city_name_full, params) {
+  df <- datasets_uni[[city_name_full]]
+  df$Date <- as.Date(df$Date)
+  N <- nrow(df)
+
+  # Treino = tudo menos os últimos 7 dias
+  train_idx <- 1:(N - 7)
+  test_idx  <- (N - 6):N
+
+  train <- df[train_idx, ]
+  test  <- df[test_idx, ]
+
+  X_train <- as.matrix(train[, !(names(train) %in% c("Date", "Num_Customers")), drop = FALSE])
+  y_train <- train$Num_Customers
+  X_test  <- as.matrix(test[,  !(names(test)  %in% c("Date", "Num_Customers")), drop = FALSE])
+
+  d_train <- xgboost::xgb.DMatrix(data = X_train, label = y_train)
+  d_test  <- xgboost::xgb.DMatrix(data = X_test)
+
+  model <- xgboost::xgb.train(params = params, data = d_train, nrounds = 1000)
+  preds <- as.numeric(predict(model, d_test))
+
+  # pós-processamento
+  preds <- pmax(0, round(preds))
+  preds[format(test$Date, "%m-%d") == "12-25"] <- 0
+
+  cat("✓", city_name_full, "— 7 previsões geradas para",
+      as.character(test$Date[1]), "a", as.character(test$Date[7]), "\n")
+
+  data.frame(
+    store    = sub("_multi$", "", city_name_full),
+    date     = as.character(test$Date),
+    forecast = preds
+  )
+}
+
+df_forecasts_xgb <- do.call(rbind, lapply(
+  c("baltimore_multi", "lancaster_multi",
+    "philadelphia_multi", "richmond_multi"),
+  predict_last_week_xgb,
+  params = params
+))
+
+write.csv(df_forecasts_xgb, "forecasts/forecasts_xgb.csv", row.names = FALSE)
+cat("\n✓ Forecasts XGBoost guardados em forecasts/forecasts_xgb.csv\n")
+print(df_forecasts_xgb)
+```
+
 
 
