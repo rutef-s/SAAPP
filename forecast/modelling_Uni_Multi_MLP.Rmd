@@ -409,28 +409,54 @@ get_melhor_uni <- function(bt_uni) {
   return(list(cfg=melhor_cfg, modelo=melhor_modelo, lags=melhor_lags))
 }
 
-datas_futuras <- seq(as.Date("2014-06-15"), by="day", length.out=7)
+# ─────────────────────────────────────────────────────────────────────────────
+# Previsão final — última semana DO dataset (para comparação com valores reais)
+# ─────────────────────────────────────────────────────────────────────────────
+# Trunca os últimos 7 dias do treino e prevê esses dias (que são conhecidos)
+# → permite calcular NMAE no save_best_forecast.R
 
+NPRED_FINAL <- 7
+
+# Datas reais da última semana de cada loja (assume coluna Date no dataset)
+N_balt <- nrow(baltimore_uni)
+N_lanc <- nrow(lancaster_uni)
+N_phil <- nrow(philadelphia_uni)
+N_rich <- nrow(richmond_uni)
+
+datas_balt <- baltimore_uni$Date[(N_balt - 6):N_balt]
+datas_lanc <- lancaster_uni$Date[(N_lanc - 6):N_lanc]
+datas_phil <- philadelphia_uni$Date[(N_phil - 6):N_phil]
+datas_rich <- richmond_uni$Date[(N_rich - 6):N_rich]
+
+# Selecionar melhor config univariada
 melhor_balt <- get_melhor_uni(bt_uni_balt)
 melhor_lanc <- get_melhor_uni(bt_uni_lanc)
 melhor_phil <- get_melhor_uni(bt_uni_phil)
 melhor_rich <- get_melhor_uni(bt_uni_rich)
 
-prev_balt <- previsao_final(baltimore_uni$Num_Customers, "Baltimore",
+# ── Univariado — treinar com [1:(N-7)] e prever últimos 7 ────────────────
+prev_balt <- previsao_final(baltimore_uni$Num_Customers[1:(N_balt - 7)],
+                             "Baltimore",
                              lags=melhor_balt$lags,
-                             datas_futuras=datas_futuras,
+                             datas_futuras=datas_balt,
                              melhor_modelo=melhor_balt$modelo)
-prev_lanc <- previsao_final(lancaster_uni$Num_Customers, "Lancaster",
+
+prev_lanc <- previsao_final(lancaster_uni$Num_Customers[1:(N_lanc - 7)],
+                             "Lancaster",
                              lags=melhor_lanc$lags,
-                             datas_futuras=datas_futuras,
+                             datas_futuras=datas_lanc,
                              melhor_modelo=melhor_lanc$modelo)
-prev_phil <- previsao_final(philadelphia_uni$Num_Customers, "Philadelphia",
+
+prev_phil <- previsao_final(philadelphia_uni$Num_Customers[1:(N_phil - 7)],
+                             "Philadelphia",
                              lags=melhor_phil$lags,
-                             datas_futuras=datas_futuras,
+                             datas_futuras=datas_phil,
                              melhor_modelo=melhor_phil$modelo)
-prev_rich <- previsao_final(richmond_uni$Num_Customers, "Richmond",
+
+prev_rich <- previsao_final(richmond_uni$Num_Customers[1:(N_rich - 7)],
+                             "Richmond",
                              lags=melhor_rich$lags,
-                             datas_futuras=datas_futuras,
+                             datas_futuras=datas_rich,
                              melhor_modelo=melhor_rich$modelo)
 ```
 
@@ -802,6 +828,7 @@ get_melhor_multi <- function(bt_multi) {
   return(list(cfg=melhor_cfg, exo_cols=exo_cols))
 }
 
+
 previsao_final_multi <- function(df_multi, loja_nome, exo_cols, npred=NPRED,
                                   datas_futuras=NULL) {
   mtr_end <- prepare_endogenous(df_multi)
@@ -809,34 +836,56 @@ previsao_final_multi <- function(df_multi, loja_nome, exo_cols, npred=NPRED,
   exogen  <- prepare_exogenous_config(df_multi, N, exo_cols)
 
   MNN  <- mfit(mtr_end, "mlpe", VINP, exogen=exogen)
-  Pred <- lforecastm(MNN, h=npred, exogen=if (!is.null(exogen)) tail(exogen, npred) else NULL)
+  Pred <- lforecastm(MNN, h=npred,
+                     exogen=if (!is.null(exogen)) tail(exogen, npred) else NULL)
   P_final <- postprocess_predictions(Pred[[1]], datas_futuras)
 
   cat("\n===", loja_nome, "Multi — Previsão próximos 7 dias ===\n")
   for (i in 1:npred) {
-    data_str <- if (!is.null(datas_futuras)) paste0(" (", format(as.Date(datas_futuras)[i], "%Y-%m-%d"), ")") else ""
+    data_str <- if (!is.null(datas_futuras))
+                  paste0(" (", format(as.Date(datas_futuras)[i], "%Y-%m-%d"), ")")
+                else ""
     cat("Dia +", i, data_str, ":", P_final[i], "clientes\n")
   }
   return(P_final)
 }
+
+
+# ── Multivariado — treinar com df[1:(N-7), ] e prever últimos 7 ──────────
+N_balt_m <- nrow(baltimore_multi)
+N_lanc_m <- nrow(lancaster_multi)
+N_phil_m <- nrow(philadelphia_multi)
+N_rich_m <- nrow(richmond_multi)
+
+datas_balt_m <- baltimore_multi$Date[(N_balt_m - 6):N_balt_m]
+datas_lanc_m <- lancaster_multi$Date[(N_lanc_m - 6):N_lanc_m]
+datas_phil_m <- philadelphia_multi$Date[(N_phil_m - 6):N_phil_m]
+datas_rich_m <- richmond_multi$Date[(N_rich_m - 6):N_rich_m]
 
 melhor_multi_balt <- get_melhor_multi(bt_multi_balt)
 melhor_multi_lanc <- get_melhor_multi(bt_multi_lanc)
 melhor_multi_phil <- get_melhor_multi(bt_multi_phil)
 melhor_multi_rich <- get_melhor_multi(bt_multi_rich)
 
-prev_multi_balt <- previsao_final_multi(baltimore_multi, "Baltimore",
+prev_multi_balt <- previsao_final_multi(baltimore_multi[1:(N_balt_m - 7), ],
+                                         "Baltimore",
                                          exo_cols=melhor_multi_balt$exo_cols,
-                                         datas_futuras=datas_futuras)
-prev_multi_lanc <- previsao_final_multi(lancaster_multi, "Lancaster",
+                                         datas_futuras=datas_balt_m)
+
+prev_multi_lanc <- previsao_final_multi(lancaster_multi[1:(N_lanc_m - 7), ],
+                                         "Lancaster",
                                          exo_cols=melhor_multi_lanc$exo_cols,
-                                         datas_futuras=datas_futuras)
-prev_multi_phil <- previsao_final_multi(philadelphia_multi, "Philadelphia",
+                                         datas_futuras=datas_lanc_m)
+
+prev_multi_phil <- previsao_final_multi(philadelphia_multi[1:(N_phil_m - 7), ],
+                                         "Philadelphia",
                                          exo_cols=melhor_multi_phil$exo_cols,
-                                         datas_futuras=datas_futuras)
-prev_multi_rich <- previsao_final_multi(richmond_multi, "Richmond",
+                                         datas_futuras=datas_phil_m)
+
+prev_multi_rich <- previsao_final_multi(richmond_multi[1:(N_rich_m - 7), ],
+                                         "Richmond",
                                          exo_cols=melhor_multi_rich$exo_cols,
-                                         datas_futuras=datas_futuras)
+                                         datas_futuras=datas_rich_m)
 ```
 
 ```{r}
@@ -847,10 +896,10 @@ prev_multi_rich <- previsao_final_multi(richmond_multi, "Richmond",
 dir.create("forecasts", showWarnings = FALSE)
 
 df_forecasts_mlp <- rbind(
-  data.frame(store="baltimore",    date=as.character(datas_futuras), forecast=prev_multi_balt),
-  data.frame(store="lancaster",    date=as.character(datas_futuras), forecast=prev_multi_lanc),
-  data.frame(store="philadelphia", date=as.character(datas_futuras), forecast=prev_multi_phil),
-  data.frame(store="richmond",     date=as.character(datas_futuras), forecast=prev_multi_rich)
+  data.frame(store="baltimore",    date=as.character(datas_balt_m), forecast=prev_multi_balt),
+  data.frame(store="lancaster",    date=as.character(datas_lanc_m), forecast=prev_multi_lanc),
+  data.frame(store="philadelphia", date=as.character(datas_phil_m), forecast=prev_multi_phil),
+  data.frame(store="richmond",     date=as.character(datas_rich_m), forecast=prev_multi_rich)
 )
 
 write.csv(df_forecasts_mlp, "forecasts/forecasts_mlp.csv", row.names=FALSE)
