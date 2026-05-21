@@ -1,5 +1,13 @@
 "model","store","NMAE"
-"MLP","baltimore",NA
-"MLP","lancaster",NA
-"MLP","philadelphia",NA
-"MLP","richmond",NA
+"MLP","baltimore",71.2053571428571
+"MLP","lancaster",83.1168831168831
+"MLP","philadelphia",27.4582560296846
+"MLP","richmond",54.0816326530612
+"XGBoost","baltimore",10.0446428571429
+"XGBoost","lancaster",13.7291280148423
+"XGBoost","philadelphia",3.71057513914657
+"XGBoost","richmond",15.9863945578231
+"ARIMAX","baltimore",14.5089285714286
+"ARIMAX","lancaster",31.1688311688312
+"ARIMAX","philadelphia",11.873840445269
+"ARIMAX","richmond",8.84353741496599
